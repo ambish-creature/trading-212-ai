@@ -1,93 +1,189 @@
 # 🌲 How to Train & Analyze the Trading 212 AI Model
 
-This guide teaches you exactly how to fetch fresh data, preprocess features, trigger the Deep Learning model training by hand, and analyze the outputs to assess model performance.
+A complete guide to running the full data pipeline, training, backtesting,
+and the self-tuning auto-training loop. All commands run from the project root.
 
 ---
 
-## 🛠️ Step-by-Step Execution Commands
+## ⚙️ Setup
 
-To execute a full self-training pipeline manually, run these commands in sequence from your project root directory (ensure your virtual environment is active):
-
-### Step 1: Fetch Fresh Historical Data
-This downloads a full, fresh 10-year historical dataset of daily bars and corporate actions (dividends) for all 12 portfolio assets via Yahoo Finance:
 ```bash
+# Activate your virtual environment
 source venv/bin/activate
+
+# Install / upgrade all dependencies (do this once after pulling changes)
+pip install -r requirements.txt
+```
+
+---
+
+## 🛠️ Step-by-Step Command Pipeline
+
+Run these commands in order:
+
+```
+fetch.py  →  fetch_macro.py  →  fetch_fundamentals.py  →  fetch_sentiment.py
+    │                 │                   │                        │
+    ▼                 ▼                   ▼                        ▼
+data/raw/       data/macro/       data/fundamentals/      data/sentiment/
+    │                                                             │
+    └──────────────── preprocess.py ─────────────────────────────┘
+                           │
+                           ▼
+                    data/processed/
+                           │
+                     train.py / auto_train.py
+                           │
+                    models/saved/*.pt
+                           │
+                      backtest.py
+```
+
+### Step 1 — Fetch OHLCV + GBP/USD FX data
+```bash
 python src/data/fetch.py
 ```
-*Outputs*: Saved raw CSVs for all assets under `data/raw/` (e.g., `SPY.csv`, `VWRL.L.csv`, `TSLA.csv`).
+Downloads 10 years of daily price + dividend data for all 12 assets, plus
+the daily GBP/USD exchange rate (used to convert USD assets to GBP).
 
-### Step 2: Preprocess Features & Align Targets
-This computes technical indicators, handles dividend scaling, adds category one-hot flags, fits a global StandardScaler, and stacks/shuffles sequences into training, validation, and test splits:
+*Output*: `data/raw/<TICKER>.csv`, `data/raw/GBPUSD.csv`
+
+### Step 2 — Fetch Macroeconomic data
+```bash
+python src/data/fetch_macro.py
+```
+Downloads from FRED (St. Louis Fed free API, no key needed):
+- US Federal Funds Rate, 10-Year Treasury yield, CPI, GDP growth, Unemployment
+- Crude oil (WTI) and Gold prices via Yahoo Finance
+
+*Output*: `data/macro/*.csv`, `data/macro/macro_combined.csv`
+
+### Step 3 — Fetch Fundamental ratios
+```bash
+python src/data/fetch_fundamentals.py
+```
+Downloads per-ticker P/E, P/B, ROE, D/E, EPS, Revenue Growth, Dividend Yield
+etc. from Yahoo Finance. ETFs have fewer ratios (filled with 0 for neutrality).
+
+*Output*: `data/fundamentals/<TICKER>_fundamentals.csv`
+
+### Step 4 — Fetch Sentiment data
+```bash
+python src/data/fetch_sentiment.py
+```
+Downloads analyst Buy/Hold/Sell ratings → converts to 1–5 score,
+scores recent news headlines with VADER sentiment, fetches institutional %.
+
+*Output*: `data/sentiment/<TICKER>_sentiment.csv`
+
+### Step 5 — Preprocess & build feature matrix
 ```bash
 python src/data/preprocess.py
 ```
-*Outputs*: Saves processed training arrays (`X_train.npy`, `y_train.npy`), validation arrays (`X_val.npy`, `y_val.npy`), individual test npy arrays, and the global `scaler.pkl` under `data/processed/`.
+Combines all data sources into a unified feature matrix (~43 features per day):
+- OHLCV + Technical: 19 features (SMA, EMA, RSI, MACD, BB, ATR, etc.)
+- Macroeconomic: 7 features (rates, CPI, GDP, oil, gold)
+- FX Rate: 1 (GBP/USD)
+- Fundamentals: 10 (PE, PB, ROE, etc.)
+- Sentiment: 3 (analyst score, news sentiment, institutional %)
+- Category one-hot: 3 (ETF / Tech / Consumer)
 
-### Step 3: Run Model Retraining & Optuna Tuning
-This triggers the hyperparameter tuning search (running 3 automated search trials) and trains the final LSTM-Attention model on the optimal parameters using our custom **Asymmetric Loss Function** (to natively avoid crashes):
+Fits a single global StandardScaler **only on training data** (no leakage).
+
+*Output*: `data/processed/X_train.npy`, `y_train.npy`, `X_val.npy`, `y_val.npy`,
+`<TICKER>_X_test.npy`, `<TICKER>_y_test.npy`, `scaler.pkl`, `feature_cols.pkl`
+
+### Step 6a — Manual training run
 ```bash
 python src/models/train.py
 ```
-*Outputs*: Saves final `.pt` weights and configuration `.json` parameters under `models/saved/` (e.g., `model_next_day_20260523_163517.pt` and `model_next_day_20260523_163517_params.json`).
+Runs 3 Optuna trials → trains final LSTM-Attention model with asymmetric loss.
 
----
+*Output*: `models/saved/model_next_day_<timestamp>.pt` + `_params.json`
 
-## 📊 How to Analyze the Training Outputs
-
-When running `python src/models/train.py`, the console will output three main sections of feedback. Here is how to read them:
-
-### 1. Optuna Hyperparameter Trials
-During the optimization phase, you will see lines like this:
-```text
-[I 2026-05-23 18:02:23,764] Trial 0 finished with value: 0.8796 and parameters: {'hidden_size': 128, 'num_layers': 1, 'dropout': 0.45, 'lr': 0.0003, 'batch_size': 64}. Best is trial 0 with value: 0.8796.
-```
-* **`value: 0.8796`**: This is the validation **Asymmetric Gaussian Negative Log-Likelihood (NLL)**. 
-  - *Lower is better*. A smaller score indicates that the model's return predictions are highly accurate and its uncertainty estimations are mathematically sound.
-  - If a trial fails or overfits, Optuna's pruning mechanism immediately cuts it short to save execution time.
-
-### 2. Early Stopping
-During the final model training phase, you will see a printout indicating when training halted:
-```text
-Early stopping triggered at epoch 30
-```
-* **Why it triggers**: The final training loop runs for a maximum of 100 epochs, but it monitors validation loss. If the validation loss fails to improve for 15 consecutive epochs, the script terminates training.
-* **Why this is good**: It acts as a safety shield, preventing the LSTM from "memorizing" historical details (overfitting) so it can successfully generalize to unseen market dynamics in live trading.
-
-### 3. Asymmetric Loss Behavior
-The training utilizes a custom **`AsymmetricGaussianNLLLoss`**.
-* **False Positive Penalty**: When the model predicts a price rise (`mu > 0`) but the stock actually drops (`target < 0`), the loss is multiplied by **`3.0x`**.
-* **Model Response**: The model's return prediction ($\mu$) will naturally shift downwards under high market volatility. You will notice that the model outputs conservative, negative return forecasts during correction periods, safely keeping your portfolio in cash (false negatives) to avoid catastrophic drops.
-
----
-
-## 📈 Running and Analyzing Backtests
-
-After training a new model, you can instantly evaluate how it trades historically (Feb 2025 – May 2026) using the **`advanced_ai`** fractional exit strategy:
+### Step 6b — Self-tuning auto-training (RECOMMENDED)
 ```bash
+python src/models/auto_train.py --max-cycles 10 --target-multiplier 1.25
+```
+Automatically runs up to 10 cycles of: train → backtest → compare vs AER.
+Stops early when the bot beats 1.25× the savings account interest,
+confirmed in 3 rolling validation windows (not just lucky on one period).
+
+Options:
+- `--max-cycles N` — maximum number of retrain cycles (default: 10)
+- `--target-multiplier X` — target return multiple over AER (default: 1.25)
+- `--min-cycles N` — minimum cycles before early-stop check (default: 3)
+
+### Step 7 — Run backtest
+```bash
+# All assets
 python src/trading/backtest.py --ticker all --strategy advanced_ai
+
+# Single asset
+python src/trading/backtest.py --ticker TSLA --strategy advanced_ai
 ```
 
-### Deciphering the Backtest Table
-The terminal will display a complete comparative simulation table:
+---
+
+## 📊 Reading Backtest Output
+
 ```text
-==========================================================================================
-TICKER     | CATEGORY   | FINAL VALUE  | NET PROFIT      | MAX DRAWDOWN   | DIVIDENDS   | TRADES
-------------------------------------------------------------------------------------------
-SPY        | ETF        | $5,083.90    | $+83.90 (+1.68%) | -1.72        % | $6.96       | 196 B / 208 S
-TSLA       | Tech       | $5,132.90    | $+132.90 (+2.66%) | -0.79        % | $0.00       | 13 B / 19 S
+TICKER     | CAT      | FINAL £    | NET PnL              | DRAWDOWN   | DIVS     | INTEREST   | AER BENCH | TRADES
+SPY        | ETF      | £427.45    | £+10.12 (+2.43%)     | -0.82 %    | £1.23    | £3.41      | £424.50   | 15B / 23S
 ...
-==========================================================================================
-🏆 COMBINED MULTI-ASSET PORTFOLIO RESULTS:
-   • Total Starting Portfolio:  $60,000.00
-   • Total Portfolio Net PnL:   $+623.55 (+1.04%)
-   • Total Dividends Collected: $48.90
-==========================================================================================
+════════════════════════════════════════════════════════
+🏆 COMBINED PORTFOLIO RESULTS (Starting: £5,000.00 GBP)
+   • Total Net PnL (Trading): £+84.52 (+1.69%)
+   • Total Dividends:         £9.87
+   • Total Bank Interest:     £41.23
+   • All-in Return:           £+135.62
+   ─────────────────────────────────────────────────
+   📊 AER Benchmark:          £5,234.10 (savings account return)
+   📊 AER Interest:           +£234.10 (4.81% p.a. avg)
+   ✅ Bot BEATS the AER benchmark
+   🎉 Return is 1.58× the savings account interest!
 ```
 
-#### Metrics Dictionary:
-1. **`NET PROFIT`**: Total gain or loss generated by the AI strategy. Look for a positive combined percentage (e.g. `+1.04%`).
-2. **`MAX DRAWDOWN`**: The largest peak-to-trough drop in portfolio value during the backtest. 
-   - *Analysis*: If drawdowns remain small (e.g. `-1.26%` or `-0.79%`), it proves the model is successfully avoiding holding assets through major drops.
-3. **`DIVIDENDS`**: Total cash payouts received from company distributions during holding periods. This is added directly to your cash profit.
-4. **`TRADES`**: Total buy (`B`) and sell (`S`) operations executed.
-   - *Analysis*: In the `advanced_ai` strategy, you will notice more sells (`S`) than buys (`B`) due to fractional sells (partial profit-taking or time-delayed risk trimming).
+### Key Metrics:
+| Metric | What it means |
+|--------|--------------|
+| `FINAL £` | What this asset's allocation grew to |
+| `NET PnL` | Pure trading profit/loss (excluding interest & dividends) |
+| `DRAWDOWN` | Worst peak-to-trough drop. 0.00% = bot held cash through crash |
+| `DIVS` | Dividend income collected while holding positions |
+| `INTEREST` | Bank AER interest earned on free cash each day |
+| `AER BENCH` | What £ you'd have if you'd put the money in a savings account |
+| `Multiplier` | Combined return ÷ AER interest. Target: ≥ 1.25× |
+
+---
+
+## 🔧 Fine-Tuning Risk vs Reward
+
+In `src/models/train.py`, line ~168:
+```python
+criterion = AsymmetricGaussianNLLLoss(penalty_factor=3.0)
+```
+| `penalty_factor` | Behaviour |
+|:---:|---|
+| `1.0` | Symmetric — model treats upside and downside equally |
+| `2.0` | Moderately conservative |
+| `3.0` | **Default** — 3× harder penalty for calling a rise on a falling market |
+| `5.0+` | Very cautious — will mostly sit in cash during uncertainty |
+
+The `auto_train.py` script automatically adjusts this between 1.0 and 6.0 based on:
+- High drawdowns → increase penalty (be safer)
+- Near-zero trading returns → decrease penalty (be more active)
+
+---
+
+## 🏦 Cash Reserve Rules
+
+The bot always keeps **20% of current portfolio value** in cash (emergency reserve).
+This ensures there is always money to buy into sudden market crashes.
+
+Max spend per single trade = `15% × (free_cash - reserve_floor) × confidence_score`
+
+Example with £5,000 portfolio:
+- Reserve floor: £1,000 (20%)
+- Available above reserve: £4,000
+- Max per trade: £600 × confidence (e.g. 75% → £450 spent)

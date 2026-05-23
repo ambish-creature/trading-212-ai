@@ -1,0 +1,10 @@
+requests
+python-dotenv
+pandas
+numpy
+scikit-learn
+torch
+yfinance
+jupyter
+optuna
+ta

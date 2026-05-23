@@ -80,8 +80,9 @@ graph TD
    - SIMULATES trading over the historical test split (Feb 2025 – May 2026).
    - Incorporates real **dividend payout tracking**: on days when a stock distributes a dividend, it adds `held_shares * dividend_per_share` directly to `free_cash` and logs it as profit.
    - Handles multi-asset evaluation by feeding the correct category one-hot vector alongside sequence features.
-   - Compares performance of four distinct strategies:
-     - **AI Model** (using active neural net predictions)
+   - Compares performance of five distinct strategies:
+     - **Advanced AI** (champion strategy: uses dual-headed model predictions to enter trades, takes 30% partial profit when close price hits entry + 20, executes 30% time-delayed downside exits exactly 2 days after high-confidence downside warning signals, and exits remaining shares at day 5)
+     - **AI Model** (standard single-stage prediction exits)
      - **RSI + BB Mean Reversion**
      - **PnL Box** (3% Take Profit / 1.5% Stop Loss)
      - **SMA Crossover** (Trend)

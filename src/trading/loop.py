@@ -117,6 +117,85 @@ def run_trading_loop(dry_run=False):
     portfolio_value = free_cash + total_holdings_value
     print(f"📊 Total Portfolio Value: ${portfolio_value:,.2f}")
 
+    # 1.1 Load and Synchronize persistent active plans for advanced fractional sells
+    processed_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/processed/'))
+    plans_path = os.path.join(processed_dir, 'active_plans.json')
+    active_plans = {}
+    if os.path.exists(plans_path):
+        try:
+            with open(plans_path, 'r') as f:
+                active_plans = json.load(f)
+        except Exception as e:
+            print(f"⚠️  Error loading active_plans.json: {e}")
+            
+    # Clean up plans for tickers we no longer hold
+    for tk in list(active_plans.keys()):
+        if tk not in pos_dict:
+            active_plans.pop(tk)
+            
+    # Sync and increment days_held for held positions
+    for tk, pos in pos_dict.items():
+        if tk not in active_plans:
+            active_plans[tk] = {
+                "entry_price": pos["currentPrice"],
+                "initial_qty": pos["quantity"],
+                "days_held": 0,
+                "price_target_sold": False,
+                "downside_trigger_day": None
+            }
+        else:
+            active_plans[tk]["days_held"] += 1
+            
+    # 1.2 Process daily active conditional plans before running new evaluations
+    print("\n⏳ Processing active fractional sell plans...")
+    for tk, plan in list(active_plans.items()):
+        held_qty = pos_dict.get(tk, {}).get("quantity", 0.0)
+        current_price = pos_dict.get(tk, {}).get("currentPrice", 0.0)
+        t212_ticker = TICKER_MAPPING.get(tk, tk)
+        
+        if held_qty <= 0:
+            continue
+            
+        # Check 1: Price-Target Sell (30% when price >= entry_price + 20)
+        if not plan.get("price_target_sold", False) and current_price >= plan["entry_price"] + 20.0:
+            sell_qty = round(plan["initial_qty"] * 0.3, 2)
+            if sell_qty > 0 and held_qty >= sell_qty:
+                print(f"   🎯 PRICE TARGET TRIGGERED: {tk} rose above buy_price + 20 (${current_price:.2f})")
+                print(f"   💰 Sized Order: Fractional Sell {sell_qty:.2f} shares of {t212_ticker}")
+                if dry_run:
+                    print(f"   📝 [DRY RUN] Simulating SELL order for {sell_qty:.2f} shares of {t212_ticker}.")
+                else:
+                    place_market_order(t212_ticker, -sell_qty)
+                plan["price_target_sold"] = True
+                pos_dict[tk]["quantity"] = round(held_qty - sell_qty, 2) # Update local quantity
+                held_qty = pos_dict[tk]["quantity"]
+                
+        # Check 2: Time-Delayed Downside Sell (30% exactly 2 days after trigger)
+        trigger_day = plan.get("downside_trigger_day")
+        if trigger_day is not None and plan["days_held"] == trigger_day + 2:
+            sell_qty = round(plan["initial_qty"] * 0.3, 2)
+            if sell_qty > 0 and held_qty >= sell_qty:
+                print(f"   📉 DOWNSIDE DELAYED TRIGGERED: {tk} downside trigger + 2 days reached (Age: {plan['days_held']} days)")
+                print(f"   💰 Sized Order: Fractional Sell {sell_qty:.2f} shares of {t212_ticker}")
+                if dry_run:
+                    print(f"   📝 [DRY RUN] Simulating SELL order for {sell_qty:.2f} shares of {t212_ticker}.")
+                else:
+                    place_market_order(t212_ticker, -sell_qty)
+                plan["downside_trigger_day"] = None # Clear trigger
+                pos_dict[tk]["quantity"] = round(held_qty - sell_qty, 2)
+                held_qty = pos_dict[tk]["quantity"]
+                
+        # Check 3: Final Time-Exit (5 days)
+        if plan["days_held"] >= 5:
+            print(f"   ⏰ TIME EXIT TRIGGERED: {tk} age reached {plan['days_held']} days. Liquidating all remaining shares.")
+            print(f"   💰 Sized Order: Liquidate {held_qty:.2f} shares of {t212_ticker}")
+            if dry_run:
+                print(f"   📝 [DRY RUN] Simulating SELL order for {held_qty:.2f} shares of {t212_ticker}.")
+            else:
+                place_market_order(t212_ticker, -held_qty)
+            active_plans.pop(tk)
+            pos_dict.pop(tk, None)
+
     # 2. Find and load the latest trained model
     print("\n📦 Loading confidence-aware model...")
     try:
@@ -131,7 +210,6 @@ def run_trading_loop(dry_run=False):
     print(f"   Params: hidden={best_params['hidden_size']}, layers={best_params['num_layers']}, dropout={best_params['dropout']:.3f}")
 
     # Load scaler
-    processed_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data/processed/'))
     with open(os.path.join(processed_dir, 'scaler.pkl'), 'rb') as f:
         scaler = pickle.load(f)
 
@@ -214,27 +292,51 @@ def run_trading_loop(dry_run=False):
                     print(f"   📝 [DRY RUN] Simulating BUY order for {qty:.2f} shares of {t212_ticker}.")
                 else:
                     place_market_order(t212_ticker, qty)
+                
+                # Add to persistent active plans
+                active_plans[ticker] = {
+                    "entry_price": current_price,
+                    "initial_qty": qty,
+                    "days_held": 0,
+                    "price_target_sold": False,
+                    "downside_trigger_day": None
+                }
             else:
                 print("   ⚠️  Sized quantity rounded to 0.0 shares. Skipping.")
 
         elif predicted_return < 0 and confidence >= CONFIDENCE_THRESHOLD:
-            # --- SELL SIGNAL ---
-            print(f"   📢 SELL Signal identified (Confidence: {confidence:.1f}%)")
+            # --- SELL / DOWNSIDE SIGNAL ---
+            print(f"   📢 SELL/DOWNSIDE Signal identified (Confidence: {confidence:.1f}%)")
             
-            # Verify if we currently hold this ticker
-            held_qty = pos_dict.get(ticker, {}).get("quantity", 0.0)
-            if held_qty > 0:
-                print(f"   💰 Sized Order: Liquidate all {held_qty:.2f} shares of {t212_ticker}")
-                if dry_run:
-                    print(f"   📝 [DRY RUN] Simulating SELL order for {held_qty:.2f} shares of {t212_ticker}.")
-                else:
-                    # Trading 212 API places sells by passing a negative quantity
-                    place_market_order(t212_ticker, -held_qty)
+            # If high-confidence downside warning (>= 65%), trigger the delayed fractional plan instead of selling everything
+            if confidence >= 65.0 and ticker in active_plans:
+                plan = active_plans[ticker]
+                if plan.get("downside_trigger_day") is None:
+                    plan["downside_trigger_day"] = plan["days_held"]
+                    print(f"   📉 Registered Downside Sell Plan: Sell 30% of {ticker} holdings 2 days from now.")
             else:
-                print(f"   ℹ️  No open positions currently held for {t212_ticker}. Skipping short-sell.")
+                # Normal liquidation signal
+                held_qty = pos_dict.get(ticker, {}).get("quantity", 0.0)
+                if held_qty > 0:
+                    print(f"   💰 Sized Order: Liquidate all {held_qty:.2f} shares of {t212_ticker}")
+                    if dry_run:
+                        print(f"   📝 [DRY RUN] Simulating SELL order for {held_qty:.2f} shares of {t212_ticker}.")
+                    else:
+                        place_market_order(t212_ticker, -held_qty)
+                    active_plans.pop(ticker, None)
+                else:
+                    print(f"   ℹ️  No open positions currently held for {t212_ticker}. Skipping short-sell.")
 
         else:
             print(f"   💤 Signal weak or below confidence threshold ({confidence:.1f}% < {CONFIDENCE_THRESHOLD}%). No action taken.")
+
+    # 5. Persist all updated active plans to active_plans.json
+    try:
+        with open(plans_path, 'w') as f:
+            json.dump(active_plans, f, indent=4)
+        print("\n📝 Active plans successfully saved to active_plans.json.")
+    except Exception as e:
+        print(f"❌ Failed to save active plans: {e}")
 
     print("\n" + "=" * 60)
     print("🏁 AUTOMATED TRADING LOOP EXECUTION COMPLETED")

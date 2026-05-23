@@ -72,7 +72,7 @@ def run_single_backtest(ticker="SPY", strategy="ai", holding_days=5, confidence_
     model = None
     device = None
     feature_cols_len = X_test.shape[2]
-    if strategy in ["ai", "pnl_box"]:
+    if strategy in ["ai", "pnl_box", "advanced_ai"]:
         model_path, params_path = find_latest_model(ACTIVE_TIMEFRAME)
         with open(params_path, 'r') as f:
             best_params = json.load(f)
@@ -121,6 +121,9 @@ def run_single_backtest(ticker="SPY", strategy="ai", holding_days=5, confidence_
         # C. Check for Strategy exits
         active_positions = []
         for pos in open_positions:
+            if pos["qty"] <= 0.0:
+                continue
+                
             qty = pos["qty"]
             buy_price = pos["buy_price"]
             days_held = pos["days_held"]
@@ -140,10 +143,64 @@ def run_single_backtest(ticker="SPY", strategy="ai", holding_days=5, confidence_
                     exit_triggered = True
                     exit_type = "STOP LOSS (-1.5%)"
                     
-            # Time exit check
-            if not exit_triggered and days_held >= holding_days:
-                exit_triggered = True
-                exit_type = "TIME EXIT"
+            # Advanced AI strategy check
+            elif strategy == "advanced_ai":
+                initial_qty = pos.get("initial_qty", qty)
+                
+                # Check 1: Price-Target Sell (sell 30% of original holdings when value hits buy_price + 20)
+                if not pos.get("price_target_sold", False) and close_price >= buy_price + 20.0:
+                    sell_qty = round(initial_qty * 0.3, 2)
+                    if sell_qty > 0 and pos["qty"] >= sell_qty:
+                        pos["qty"] = round(pos["qty"] - sell_qty, 2)
+                        free_cash += sell_qty * close_price
+                        pos["price_target_sold"] = True
+                        pnl_fractional = sell_qty * (close_price - buy_price)
+                        pnl_fractional_pct = (close_price - buy_price) / buy_price * 100.0
+                        trade_log.append({
+                            "type": "SELL (30% PRICE TARGET)",
+                            "date": date.strftime('%Y-%m-%d'),
+                            "qty": sell_qty,
+                            "price": close_price,
+                            "pnl": pnl_fractional,
+                            "pnl_pct": pnl_fractional_pct
+                        })
+                        
+                # Check 2: Time-Delayed Downside Sell (sell 30% exactly 2 days after downside trigger)
+                trigger_day = pos.get("downside_trigger_days_held")
+                if trigger_day is not None and days_held == trigger_day + 2:
+                    sell_qty = round(initial_qty * 0.3, 2)
+                    if sell_qty > 0 and pos["qty"] >= sell_qty:
+                        pos["qty"] = round(pos["qty"] - sell_qty, 2)
+                        free_cash += sell_qty * close_price
+                        pos["downside_trigger_days_held"] = None # Clear trigger
+                        pnl_fractional = sell_qty * (close_price - buy_price)
+                        pnl_fractional_pct = (close_price - buy_price) / buy_price * 100.0
+                        trade_log.append({
+                            "type": "SELL (30% DELAYED DOWNSIDE)",
+                            "date": date.strftime('%Y-%m-%d'),
+                            "qty": sell_qty,
+                            "price": close_price,
+                            "pnl": pnl_fractional,
+                            "pnl_pct": pnl_fractional_pct
+                        })
+                
+                # Check if the position is now fully closed by fractional sells
+                if pos["qty"] <= 0.0:
+                    continue
+                
+                # Final Clean Time Exit (sell all remaining after holding_days)
+                if days_held >= holding_days:
+                    exit_triggered = True
+                    exit_type = "TIME EXIT"
+                    qty = pos["qty"] # Update remaining qty to sell
+                    pnl = qty * (close_price - buy_price)
+                    pnl_pct = (close_price - buy_price) / buy_price * 100.0
+                    
+            # Time exit check for other strategies
+            if strategy != "advanced_ai":
+                if not exit_triggered and days_held >= holding_days:
+                    exit_triggered = True
+                    exit_type = "TIME EXIT"
                 
             if exit_triggered:
                 free_cash += qty * close_price
@@ -165,7 +222,7 @@ def run_single_backtest(ticker="SPY", strategy="ai", holding_days=5, confidence_
         sell_all_signal = False
         trade_confidence = 100.0
 
-        if strategy in ["ai", "pnl_box"]:
+        if strategy in ["ai", "pnl_box", "advanced_ai"]:
             # Run AI prediction with 30 passes
             input_tensor = X_test_tensor[i].unsqueeze(0).to(device)
             all_mu = []
@@ -184,7 +241,14 @@ def run_single_backtest(ticker="SPY", strategy="ai", holding_days=5, confidence_
             if pred_return > 0 and trade_confidence >= confidence_threshold:
                 buy_signal = True
             elif pred_return < 0 and trade_confidence >= confidence_threshold:
-                sell_all_signal = True
+                if strategy == "advanced_ai":
+                    # For advanced_ai, downside confidence triggers a delayed sell rather than liquidating instantly
+                    if trade_confidence >= 65.0:
+                        for pos in open_positions:
+                            if pos.get("downside_trigger_days_held") is None:
+                                pos["downside_trigger_days_held"] = pos["days_held"]
+                else:
+                    sell_all_signal = True
 
         elif strategy == "sma":
             row = decision_df.iloc[i]
@@ -224,8 +288,11 @@ def run_single_backtest(ticker="SPY", strategy="ai", holding_days=5, confidence_
                         free_cash -= actual_spend
                         open_positions.append({
                             "qty": qty,
+                            "initial_qty": qty,
                             "buy_price": close_price,
-                            "days_held": 0
+                            "days_held": 0,
+                            "price_target_sold": False,
+                            "downside_trigger_days_held": None
                         })
                         trade_log.append({
                             "type": "BUY",
@@ -346,7 +413,7 @@ def run_backtests(ticker="SPY", strategy="ai", holding_days=5, confidence_thresh
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multi-asset historical backtester with dividends.")
     parser.add_argument("--ticker", type=str, default="SPY", help="Ticker to evaluate, or 'all' to run on all assets.")
-    parser.add_argument("--strategy", type=str, default="ai", choices=["ai", "pnl_box", "sma", "rsi_bb"], help="Strategy to evaluate.")
+    parser.add_argument("--strategy", type=str, default="ai", choices=["ai", "pnl_box", "sma", "rsi_bb", "advanced_ai"], help="Strategy to evaluate.")
     parser.add_argument("--holding-days", type=int, default=5, help="Holding period in days.")
     parser.add_argument("--confidence-threshold", type=float, default=40.0, help="Confidence threshold.")
     args = parser.parse_args()

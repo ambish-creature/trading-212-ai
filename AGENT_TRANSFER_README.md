@@ -72,7 +72,7 @@ graph TD
 
 4. **`src/models/train.py`**:
    - Defines the `Attention` block and the dual-headed `LSTMAttention` model.
-   - Custom training loop optimizing a `GaussianNLLLoss`.
+   - Custom training loop optimizing a custom **`AsymmetricGaussianNLLLoss`** class which penalizes false positives (predicting gains `mu > 0` when the actual return drops `target < 0`) heavily with a **3.0x penalty multiplier**. This natively trains the model to be extremely risk-averse and avoid buying before market corrections.
    - Integrated **Optuna hyperparameter tuning** (currently set to 3 trials to complete quickly on CPU).
    - Trains the final model using the best-performing parameters, saving the model `.pt` weights and hyperparameter `.json` configs under `models/saved/`.
 

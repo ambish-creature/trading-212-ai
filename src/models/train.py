@@ -105,6 +105,29 @@ class EarlyStopping:
             self.counter = 0
 
 # ---------------------------------------------------------------------------
+# 2.5 Asymmetric Loss Function for Risk-Aversion
+# ---------------------------------------------------------------------------
+
+class AsymmetricGaussianNLLLoss(nn.Module):
+    def __init__(self, penalty_factor=3.0, eps=1e-6):
+        super(AsymmetricGaussianNLLLoss, self).__init__()
+        self.penalty_factor = penalty_factor
+        self.eps = eps
+        
+    def forward(self, mu, target, var):
+        # Base Gaussian NLL: 0.5 * (log(var) + (target - mu)^2 / var)
+        # We add epsilon to var to prevent log(0)
+        base_loss = 0.5 * (torch.log(var + self.eps) + (target - mu)**2 / (var + self.eps))
+        
+        # Identify false positives: predicting growth (mu > 0) when it actually drops (target < 0)
+        false_positive = (mu > 0.0) & (target < 0.0)
+        
+        # Apply penalty multiplier to false positive errors
+        loss = torch.where(false_positive, base_loss * self.penalty_factor, base_loss)
+        
+        return torch.mean(loss)
+
+# ---------------------------------------------------------------------------
 # 3. Training Loop & Optuna Objective
 # ---------------------------------------------------------------------------
 
@@ -142,7 +165,7 @@ def objective(trial):
     # Gaussian NLL naturally punishes confident wrong answers heavily:
     #   loss = 0.5 * [log(sigma^2) + (target - mu)^2 / sigma^2]
     model = LSTMAttention(input_size, hidden_size, num_layers, dropout).to(device)
-    criterion = nn.GaussianNLLLoss()
+    criterion = AsymmetricGaussianNLLLoss(penalty_factor=3.0)
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
     # Learning Rate Scheduler (Reduce LR on plateau)
@@ -218,7 +241,7 @@ def train_and_save_final_model(best_params):
         dropout=best_params['dropout']
     ).to(device)
     
-    criterion = nn.GaussianNLLLoss()
+    criterion = AsymmetricGaussianNLLLoss(penalty_factor=3.0)
     optimizer = optim.Adam(model.parameters(), lr=best_params['lr'])
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     early_stopping = EarlyStopping(patience=15)

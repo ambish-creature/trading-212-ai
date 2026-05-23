@@ -6,6 +6,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import optuna
+from datetime import datetime
+import json
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 from src.config import ACTIVE_TIMEFRAME
@@ -49,12 +51,21 @@ class LSTMAttention(nn.Module):
         )
         self.attention = Attention(hidden_size)
         
-        # Fully connected layers for final prediction
-        self.fc = nn.Sequential(
+        # Head 1: Predicts the mean return (mu)
+        self.fc_mu = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, 1) # Output is a single value (next day's return)
+            nn.Linear(hidden_size // 2, 1)
+        )
+        
+        # Head 2: Predicts the log-uncertainty (log_sigma)
+        # Separate head so the model learns WHEN it is uncertain
+        self.fc_log_sigma = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, 1)
         )
 
     def forward(self, x):
@@ -64,9 +75,11 @@ class LSTMAttention(nn.Module):
         # Pass sequence through attention
         attn_out = self.attention(lstm_out)
         
-        # Final prediction
-        out = self.fc(attn_out)
-        return out.squeeze() # Squeeze to match target shape (batch_size,)
+        # Two outputs: predicted return and learned uncertainty
+        mu = self.fc_mu(attn_out).squeeze(-1)
+        log_sigma = self.fc_log_sigma(attn_out).squeeze(-1)
+        
+        return mu, log_sigma
 
 # ---------------------------------------------------------------------------
 # 2. Early Stopping
@@ -125,13 +138,15 @@ def objective(trial):
     # Device configuration
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
     
-    # Initialize Model, Loss (Huber), and Optimizer
+    # Initialize Model, Loss (Gaussian NLL), and Optimizer
+    # Gaussian NLL naturally punishes confident wrong answers heavily:
+    #   loss = 0.5 * [log(sigma^2) + (target - mu)^2 / sigma^2]
     model = LSTMAttention(input_size, hidden_size, num_layers, dropout).to(device)
-    criterion = nn.HuberLoss() # Robust to outliers
+    criterion = nn.GaussianNLLLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
     
     # Learning Rate Scheduler (Reduce LR on plateau)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=False)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
     # Early Stopping
     early_stopping = EarlyStopping(patience=15)
@@ -145,8 +160,9 @@ def objective(trial):
             batch_X, batch_y = batch_X.to(device), batch_y.to(device)
             
             optimizer.zero_grad()
-            outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
+            mu, log_sigma = model(batch_X)
+            variance = torch.exp(2 * log_sigma)  # sigma^2 = exp(2 * log_sigma)
+            loss = criterion(mu, batch_y, variance)
             loss.backward()
             
             # Gradient clipping to prevent exploding gradients
@@ -161,8 +177,9 @@ def objective(trial):
         with torch.no_grad():
             for batch_X, batch_y in val_loader:
                 batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y)
+                mu, log_sigma = model(batch_X)
+                variance = torch.exp(2 * log_sigma)
+                loss = criterion(mu, batch_y, variance)
                 val_loss += loss.item()
                 
         avg_val_loss = val_loss / len(val_loader)
@@ -180,9 +197,6 @@ def objective(trial):
             break
             
     return early_stopping.best_loss
-
-from datetime import datetime
-import json
 
 def train_and_save_final_model(best_params):
     """Trains the model on the optimal parameters and saves a timestamped backup."""
@@ -204,7 +218,7 @@ def train_and_save_final_model(best_params):
         dropout=best_params['dropout']
     ).to(device)
     
-    criterion = nn.HuberLoss()
+    criterion = nn.GaussianNLLLoss()
     optimizer = optim.Adam(model.parameters(), lr=best_params['lr'])
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     early_stopping = EarlyStopping(patience=15)
@@ -215,8 +229,9 @@ def train_and_save_final_model(best_params):
         for batch_X, batch_y in train_loader:
             batch_X, batch_y = batch_X.to(device), batch_y.to(device)
             optimizer.zero_grad()
-            outputs = model(batch_X)
-            loss = criterion(outputs, batch_y)
+            mu, log_sigma = model(batch_X)
+            variance = torch.exp(2 * log_sigma)
+            loss = criterion(mu, batch_y, variance)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -226,8 +241,9 @@ def train_and_save_final_model(best_params):
         with torch.no_grad():
             for batch_X, batch_y in val_loader:
                 batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-                outputs = model(batch_X)
-                val_loss += criterion(outputs, batch_y).item()
+                mu, log_sigma = model(batch_X)
+                variance = torch.exp(2 * log_sigma)
+                val_loss += criterion(mu, batch_y, variance).item()
         
         avg_val_loss = val_loss / len(val_loader)
         scheduler.step(avg_val_loss)
@@ -258,7 +274,7 @@ if __name__ == "__main__":
     
     print("\nBest Trial:")
     trial = study.best_trial
-    print(f"  Value (Validation Huber Loss): {trial.value}")
+    print(f"  Value (Validation Gaussian NLL): {trial.value}")
     print("  Params: ")
     for key, value in trial.params.items():
         print(f"    {key}: {value}")

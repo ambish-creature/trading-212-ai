@@ -1,10 +1,14 @@
 import os
+import sys
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import optuna
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+from src.config import ACTIVE_TIMEFRAME
 
 # ---------------------------------------------------------------------------
 # 1. Model Architecture
@@ -238,11 +242,11 @@ def train_and_save_final_model(best_params):
     save_dir = os.path.join(os.path.dirname(__file__), '../../models/saved/')
     os.makedirs(save_dir, exist_ok=True)
     
-    model_path = os.path.join(save_dir, f'model_{timestamp}.pt')
+    model_path = os.path.join(save_dir, f'model_{ACTIVE_TIMEFRAME}_{timestamp}.pt')
     torch.save(model.state_dict(), model_path)
     print(f"\n✅ Final model successfully backed up to: {model_path}")
     
-    params_path = os.path.join(save_dir, f'model_{timestamp}_params.json')
+    params_path = os.path.join(save_dir, f'model_{ACTIVE_TIMEFRAME}_{timestamp}_params.json')
     with open(params_path, 'w') as f:
         json.dump(best_params, f, indent=4)
     print(f"✅ Hyperparameters backed up to: {params_path}")

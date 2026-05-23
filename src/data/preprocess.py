@@ -1,11 +1,16 @@
 import pandas as pd
 import numpy as np
 import os
+import sys
 from sklearn.preprocessing import StandardScaler
 import ta
 import pickle
 
-def add_technical_indicators(df):
+# Add the root directory to path to import config
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+from src.config import TIMEFRAME_PROFILES, ACTIVE_TIMEFRAME
+
+def add_technical_indicators(df, target_shift):
     """
     Adds Technical Indicators to the DataFrame using the 'ta' library.
     """
@@ -22,9 +27,9 @@ def add_technical_indicators(df):
     df['BB_High'] = bollinger.bollinger_hband()
     df['BB_Low'] = bollinger.bollinger_lband()
     
-    # Target: Next Day's Percentage Return
-    # We shift -1 so today's row contains tomorrow's return
-    df['Target_Return'] = df['Close'].pct_change().shift(-1)
+    # Target: Future Percentage Return
+    # We shift -target_shift so today's row contains the return from today to `target_shift` intervals in the future
+    df['Target_Return'] = df['Close'].pct_change(periods=target_shift).shift(-target_shift)
     
     # Drop NaNs created by indicators and shifting
     df.dropna(inplace=True)
@@ -42,15 +47,21 @@ def create_sequences(features, targets, seq_length):
         ys.append(y)
     return np.array(xs), np.array(ys)
 
-def process_and_split_data(input_path, output_dir, seq_length=60, train_split=0.7, val_split=0.15):
+def process_and_split_data(input_path, output_dir, train_split=0.7, val_split=0.15):
     """
     Full pipeline: Load -> Indicators -> Scale -> Sequence -> Split -> Save
     """
-    print(f"Processing {input_path}...")
+    profile = TIMEFRAME_PROFILES[ACTIVE_TIMEFRAME]
+    seq_length = profile['seq_length']
+    target_shift = profile['target_shift']
+    
+    print(f"Processing {input_path} for timeframe '{ACTIVE_TIMEFRAME}'...")
+    print(f"Seq Length: {seq_length}, Target Shift: {target_shift}")
+    
     df = pd.read_csv(input_path, index_col='Date', parse_dates=True)
     
     # Add indicators and target
-    df = add_technical_indicators(df)
+    df = add_technical_indicators(df, target_shift)
     
     # Define feature columns (exclude target)
     feature_cols = [col for col in df.columns if col != 'Target_Return']
@@ -107,6 +118,6 @@ if __name__ == "__main__":
     processed_dir = os.path.join(os.path.dirname(__file__), '../../data/processed/')
     
     if os.path.exists(raw_path):
-        process_and_split_data(raw_path, processed_dir, seq_length=60)
+        process_and_split_data(raw_path, processed_dir)
     else:
         print(f"Raw data not found at {raw_path}. Please run src/data/fetch.py first.")

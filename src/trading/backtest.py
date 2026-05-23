@@ -10,6 +10,8 @@ import ta
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 from src.config import TIMEFRAME_PROFILES, ACTIVE_TIMEFRAME, ASSETS, CATEGORIES
+from src.models.train import LSTMAttention
+from src.models.predict import find_latest_model
 
 # ---------------------------------------------------------------------------
 # 1. Backtesting Engine with Dividends
@@ -40,6 +42,12 @@ def run_single_backtest(ticker="SPY", strategy="ai", holding_days=5, confidence_
     else:
         df['Dividends'] = df['Dividends'].fillna(0.0)
         
+    # Recreate target shift and drop NaNs exactly like preprocess.py to align splits
+    df['Target_Return'] = df['Close'].pct_change(periods=target_shift).shift(-target_shift) * 100.0
+    model_feature_cols = ['Close', 'Volume', 'RSI', 'MACD', 'MACD_Signal', 'BB_High', 'BB_Low', 'Dividends']
+    df.dropna(subset=model_feature_cols, inplace=True)
+    df.dropna(subset=['Target_Return'], inplace=True)
+    
     # Recreate test split boundaries (70% Train, 15% Val, 15% Test)
     n = len(df)
     val_end = int(n * (0.7 + 0.15))

@@ -5,6 +5,7 @@ import numpy as np
 import pickle
 import json
 import argparse
+import pandas as pd
 import yfinance as yf
 import ta
 

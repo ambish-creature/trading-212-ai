@@ -1,0 +1,10 @@
+Model Improvement Ideas
+
+* Explore bidirectional and hybrid architectures: Evaluate bidirectional LSTM (Bi‑LSTM) layers and hybrids that combine attention and multilayer perceptron (MLP) heads. These architectures can capture both forward and backward dependencies and improve feature extraction compared with a standard unidirectional LSTM.
+* Implement robust cross‑validation: Use k‑fold cross‑validation across different time windows and asset subsets to obtain more reliable performance estimates and avoid overfitting to a single time period or instrument.
+* Augment the training data: Inject small amounts of Gaussian noise into the feature inputs to increase the effective dataset size and encourage the model to generalize better to unseen data.
+* Expand the hyperparameter search space: Increase the number of Optuna trials or use grid/Bayesian optimization to tune hyperparameters such as hidden size, number of layers, dropout rate, learning rate and batch size. A broader search can uncover configurations that offer better performance.
+* Add regularization techniques: Integrate dropout layers (e.g., 0.2–0.5), L1/L2 weight decay, batch normalization and early stopping. These methods help prevent overfitting and stabilize training.
+* Experiment with different feature sets: Compare models trained on minimal features (e.g., closing price only) with those using technical indicators. Also consider incorporating macroeconomic variables or sentiment scores to capture broader market drivers.
+* Re‑run training with variants: After implementing the above changes, run the training pipeline with combinations of bidirectional LSTM, attention mechanisms, noise augmentation and varied feature sets to evaluate which approach yields the best metrics.
+* Explore newer architectures: If gains plateau, experiment with more advanced sequence models such as Transformer‑based architectures or temporal fusion transformers to capture long‑term dependencies and complex patterns.

@@ -27,9 +27,9 @@ def add_technical_indicators(df, target_shift):
     df['BB_High'] = bollinger.bollinger_hband()
     df['BB_Low'] = bollinger.bollinger_lband()
     
-    # Target: Future Percentage Return
+    # Target: Future Percentage Return (scaled by 100 for numerical stability)
     # We shift -target_shift so today's row contains the return from today to `target_shift` intervals in the future
-    df['Target_Return'] = df['Close'].pct_change(periods=target_shift).shift(-target_shift)
+    df['Target_Return'] = df['Close'].pct_change(periods=target_shift).shift(-target_shift) * 100.0
     
     # Drop NaNs created by indicators and shifting
     df.dropna(inplace=True)

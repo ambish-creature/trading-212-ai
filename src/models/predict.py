@@ -106,7 +106,8 @@ def mc_dropout_predict(model, input_tensor, device, n_samples=100):
     # Confidence score (0-100%)
     # We map uncertainty to confidence using an exponential decay
     # Lower uncertainty = higher confidence
-    confidence = max(0, min(100, 100 * np.exp(-total_uncertainty * 50)))
+    # (Scaled for percentage points: total_uncertainty of 1% is 1.0, hence * 0.5 instead of * 50)
+    confidence = max(0, min(100, 100 * np.exp(-total_uncertainty * 0.5)))
     
     # Error range (10th-90th percentile from MC samples)
     lower_bound = np.percentile(all_mu, 10)
@@ -191,10 +192,10 @@ def predict(ticker="AAPL"):
     # 5. Run Monte Carlo Dropout prediction
     result = mc_dropout_predict(model, input_tensor, device, n_samples=100)
     
-    # 6. Convert returns to prices
-    predicted_price = current_price * (1 + result['predicted_return'])
-    price_lower = current_price * (1 + result['lower_bound'])
-    price_upper = current_price * (1 + result['upper_bound'])
+    # 6. Convert returns to prices (divide returns by 100 since they are in percentage points)
+    predicted_price = current_price * (1 + result['predicted_return'] / 100.0)
+    price_lower = current_price * (1 + result['lower_bound'] / 100.0)
+    price_upper = current_price * (1 + result['upper_bound'] / 100.0)
     
     # 7. Display results
     print("=" * 55)
@@ -202,13 +203,13 @@ def predict(ticker="AAPL"):
     print("=" * 55)
     print(f"  Current Price:       ${current_price:.2f}")
     print(f"  Predicted Price:     ${predicted_price:.2f}")
-    print(f"  Predicted Return:    {result['predicted_return']*100:+.4f}%")
+    print(f"  Predicted Return:    {result['predicted_return']:+.4f}%")
     print(f"  Confidence:          {result['confidence']:.1f}%")
     print(f"  Price Range (80%):   ${price_lower:.2f} — ${price_upper:.2f}")
     print("-" * 55)
-    print(f"  MC Dropout Std:      {result['mc_std']*100:.4f}%")
-    print(f"  Model Uncertainty:   {result['model_sigma']*100:.4f}%")
-    print(f"  Total Uncertainty:   {result['total_uncertainty']*100:.4f}%")
+    print(f"  MC Dropout Std:      {result['mc_std']:.4f}%")
+    print(f"  Model Uncertainty:   {result['model_sigma']:.4f}%")
+    print(f"  Total Uncertainty:   {result['total_uncertainty']:.4f}%")
     print("=" * 55)
     
     direction = "📈 BUY signal" if result['predicted_return'] > 0 else "📉 SELL signal"

@@ -124,7 +124,7 @@ def objective(trial):
     hidden_size = trial.suggest_categorical("hidden_size", [32, 64, 128])
     num_layers = trial.suggest_int("num_layers", 1, 3)
     dropout = trial.suggest_float("dropout", 0.1, 0.5)
-    lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
+    lr = trial.suggest_float("lr", 1e-4, 2e-3, log=True)
     batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
     
     # Load Data

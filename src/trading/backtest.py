@@ -126,6 +126,7 @@ def run_single_backtest(
     holding_days=5,
     confidence_threshold=40.0,
     initial_cash_gbp=None,
+    timeframe=None,
 ):
     """
     Simulates the full trading strategy for a single ticker.
@@ -142,9 +143,12 @@ def run_single_backtest(
     if not os.path.exists(raw_path):
         raise FileNotFoundError(f"Raw data not found for {ticker}. Run fetch.py first.")
 
+    if timeframe is None:
+        timeframe = ACTIVE_TIMEFRAME
+
     df = pd.read_csv(raw_path, index_col='Date', parse_dates=True)
     df.sort_index(inplace=True)
-    profile      = TIMEFRAME_PROFILES[ACTIVE_TIMEFRAME]
+    profile      = TIMEFRAME_PROFILES[timeframe]
     seq_length   = profile['seq_length']
     target_shift = profile['target_shift']
 
@@ -168,9 +172,9 @@ def run_single_backtest(
     # Load precomputed test sequences FIRST — use their count as the authoritative
     # length for decision_df. preprocess.py may have dropped more warmup rows than
     # the backtest's own dropna, causing a size mismatch if we use seq_length directly.
-    X_test_path = os.path.join(processed_dir, f'{ticker}_X_test.npy')
+    X_test_path = os.path.join(processed_dir, f'{ticker}_X_test_{timeframe}.npy')
     if not os.path.exists(X_test_path):
-        raise FileNotFoundError(f"Test sequences not found for {ticker}. Run preprocess.py first.")
+        raise FileNotFoundError(f"Test sequences not found for {ticker} under timeframe {timeframe}. Run preprocess.py first.")
     X_test        = np.load(X_test_path)
     X_test_tensor = torch.tensor(X_test, dtype=torch.float32)
     n_sequences   = X_test.shape[0]  # authoritative number of decision days
@@ -200,7 +204,7 @@ def run_single_backtest(
     # Load AI Model
     model, device = None, None
     if strategy in ["ai", "pnl_box", "advanced_ai"]:
-        model_path, params_path = find_latest_model(ACTIVE_TIMEFRAME)
+        model_path, params_path = find_latest_model(timeframe)
         with open(params_path, 'r') as f:
             best_params = json.load(f)
         device = torch.device(
@@ -490,14 +494,18 @@ def ta_bollinger(close):
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
-def run_backtests(ticker="SPY", strategy="advanced_ai", holding_days=5, confidence_threshold=40.0):
+def run_backtests(ticker="VOO", strategy="advanced_ai", holding_days=5, confidence_threshold=40.0, timeframe=None):
     per_asset_cash = STARTING_FUND_GBP / len(ASSETS)
+
+    if timeframe is None:
+        timeframe = ACTIVE_TIMEFRAME
 
     if ticker != "all":
         res = run_single_backtest(
             ticker=ticker, strategy=strategy,
             holding_days=holding_days, confidence_threshold=confidence_threshold,
-            initial_cash_gbp=per_asset_cash
+            initial_cash_gbp=per_asset_cash,
+            timeframe=timeframe
         )
         print("=" * 70)
         print(f"🏁 STRATEGY RESULT: {ticker} ({strategy.upper()})")
@@ -531,7 +539,8 @@ def run_backtests(ticker="SPY", strategy="advanced_ai", holding_days=5, confiden
             res = run_single_backtest(
                 ticker=tk, strategy=strategy,
                 holding_days=holding_days, confidence_threshold=confidence_threshold,
-                initial_cash_gbp=per_asset_cash
+                initial_cash_gbp=per_asset_cash,
+                timeframe=timeframe
             )
             pnl_str  = f"£{res['net_pnl']:+,.2f} ({res['net_pnl_pct']:+.2f}%)"
             row = (

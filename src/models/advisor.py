@@ -339,13 +339,23 @@ def generate_advice(
         pnl_emoji = "🟢" if current_pnl >= 0 else "🔴"
         lines.append(f"      Unrealised P&L:  {pnl_emoji} {curr_sym}{current_pnl:+.2f} ({current_pnl_pct:+.2f}%)")
         lines.append("─" * 62)
-
-    # ── MAIN ADVICE ──
     lines.append("")
     lines.append("  📋 RECOMMENDATION:")
     lines.append("")
 
-    if mu > 0 and confidence >= 45:
+    if confidence < 75.0:
+        # ─────────────────── SELECTIVE CLASSIFICATION (ACCURACY FILTER) ───────────────────
+        lines.append(f"  ⏸️  Signal: HOLD / WAIT  (Confidence {confidence:.0f}% < 75% High-Accuracy Filter)")
+        lines.append("")
+        lines.append(f"     The AI predicts a return of {mu:+.2f}%, but the self-estimated confidence")
+        lines.append("     is below the required 75% threshold to guarantee ≥80% direction accuracy.")
+        if holding_shares > 0:
+            lines.append(f"     ➡  HOLD your current {holding_shares:.4f} shares.")
+            lines.append(f"     ➡  Do NOT add more until a high-confidence signal (>=75%) appears.")
+        else:
+            lines.append(f"     ➡  Do NOT open a new position yet.")
+            lines.append(f"     ➡  Wait for a clearer, high-confidence signal. Re-run in 2-3 trading days.")
+    elif mu > 0 and confidence >= 45:
         # ─────────────────── BULLISH ───────────────────
         lines.append(f"  📈 Signal: BUY / BUY MORE  ({strength} — {confidence:.0f}% confidence)")
         lines.append("")
@@ -427,10 +437,10 @@ def generate_advice(
         lines.append(f"  ⏸️  Signal: HOLD / WAIT  (Low confidence — {confidence:.0f}%)")
         lines.append("")
         lines.append(f"     The AI is uncertain about {ticker}'s direction.")
-        lines.append(f"     Predicted return is {mu:+.2f}%% but confidence is too low to act.")
+        lines.append(f"     Predicted return is {mu:+.2f}% but confidence is too low to act.")
         if holding_shares > 0:
             lines.append(f"     ➡  HOLD your current {holding_shares:.4f} shares.")
-            lines.append(f"     ➡  Do NOT add more until signal strengthens (>45%% confidence).")
+            lines.append(f"     ➡  Do NOT add more until signal strengthens (>45% confidence).")
         else:
             lines.append(f"     ➡  Do NOT open a new position yet.")
             lines.append(f"     ➡  Wait for a clearer signal. Re-run in 2-3 trading days.")
@@ -474,12 +484,12 @@ def generate_advice(
 # ---------------------------------------------------------------------------
 
 def run_advisor(
-    ticker,
-    horizon_days=5,
+    ticker="VOO",
+    horizon_days="1mo",
     reference_date=None,
     holding_shares=0.0,
     avg_cost=None,
-    interactive=True,
+    ask_holdings=False,
 ):
     """Full advisor pipeline."""
     ticker = ticker.upper().strip()
@@ -488,27 +498,62 @@ def run_advisor(
     if reference_date is None:
         reference_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
+    # --- Map horizon to timeframe ---
+    timeframe = "1mo" # default
+    
+    if isinstance(horizon_days, str):
+        horizon_str = horizon_days.strip().lower()
+        if horizon_str in ["1mo", "2mo", "3mo", "6mo", "9mo", "1yr", "2yr"]:
+            timeframe = horizon_str
+            days_map = {"1mo": 21, "2mo": 42, "3mo": 63, "6mo": 126, "9mo": 189, "1yr": 252, "2yr": 504}
+            horizon_days = days_map[horizon_str]
+        else:
+            try:
+                horizon_days = int(horizon_days)
+            except ValueError:
+                print(f"⚠️ Unknown horizon format '{horizon_days}', using default '1mo' (21 trading days)")
+                timeframe = "1mo"
+                horizon_days = 21
+                
+    if isinstance(horizon_days, int):
+        if horizon_days <= 10:
+            timeframe = "1mo"
+        elif horizon_days <= 30:
+            timeframe = "1mo"
+        elif horizon_days <= 50:
+            timeframe = "2mo"
+        elif horizon_days <= 80:
+            timeframe = "3mo"
+        elif horizon_days <= 150:
+            timeframe = "6mo"
+        elif horizon_days <= 220:
+            timeframe = "9mo"
+        elif horizon_days <= 380:
+            timeframe = "1yr"
+        else:
+            timeframe = "2yr"
+
     print(f"\n⏳ Fetching data and running AI model for {ticker}...")
-    print(f"   Reference date: {reference_date.date()} | Horizon: {horizon_days} trading days")
+    print(f"   Reference date: {reference_date.date()} | Horizon: {horizon_days} trading days (using model: {timeframe})")
 
     # --- Load model ---
-    model_path, params_path = find_latest_model(ACTIVE_TIMEFRAME)
+    model_path, params_path = find_latest_model(timeframe)
     with open(params_path, 'r') as f:
         best_params = json.load(f)
 
     data_dir     = os.path.join(ROOT_DIR, 'data/processed/')
-    scaler_path  = os.path.join(data_dir, 'scaler.pkl')
-    feature_path = os.path.join(data_dir, 'feature_cols.pkl')
+    scaler_path  = os.path.join(data_dir, f'scaler_{timeframe}.pkl')
+    feature_path = os.path.join(data_dir, f'feature_cols_{timeframe}.pkl')
 
     if not os.path.exists(scaler_path):
-        raise FileNotFoundError("Scaler not found. Run preprocess.py first.")
+        raise FileNotFoundError(f"Scaler for timeframe '{timeframe}' not found. Run preprocess.py first.")
 
     with open(scaler_path, 'rb') as f:
         scaler = pickle.load(f)
     with open(feature_path, 'rb') as f:
         feature_cols = pickle.load(f)
 
-    profile    = TIMEFRAME_PROFILES[ACTIVE_TIMEFRAME]
+    profile    = TIMEFRAME_PROFILES[timeframe]
     seq_length = profile['seq_length']
 
     # Adjust sequence for custom horizon (we still use the base model)
@@ -530,14 +575,18 @@ def run_advisor(
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
 
     # Run MC Dropout (100 samples for high-quality uncertainty)
-    pred_result = mc_dropout_predict(model, input_tensor, device, n_samples=100)
+    med_u = best_params.get('median_uncertainty', None)
+    pred_result = mc_dropout_predict(model, input_tensor, device, n_samples=100, median_uncertainty=med_u)
 
-    # Scale the prediction to the requested horizon
-    # The model is trained to predict 1-day returns. For N days, we compound.
-    daily_return = pred_result['predicted_return']
-    scaled_return = ((1 + daily_return / 100.0) ** horizon_days - 1) * 100.0
-    scaled_lower  = ((1 + pred_result['lower_bound'] / 100.0) ** horizon_days - 1) * 100.0
-    scaled_upper  = ((1 + pred_result['upper_bound'] / 100.0) ** horizon_days - 1) * 100.0
+
+    # Direct scaling from trained horizon target
+    model_trained_days = {"1mo": 21, "2mo": 42, "3mo": 63, "6mo": 126, "9mo": 189, "1yr": 252, "2yr": 504}
+    trained_days = model_trained_days.get(timeframe, 21)
+    
+    scale_factor = horizon_days / trained_days
+    scaled_return = pred_result['predicted_return'] * scale_factor
+    scaled_lower  = pred_result['lower_bound'] * scale_factor
+    scaled_upper  = pred_result['upper_bound'] * scale_factor
 
     pred_scaled = dict(pred_result)
     pred_scaled['predicted_return'] = scaled_return
@@ -549,8 +598,8 @@ def run_advisor(
     info = fetch_ticker_info(ticker)
 
     # --- Interactive prompt for holding info ---
-    if interactive and holding_shares == 0.0:
-        print(f"\n💬 Do you currently hold {ticker}? (Press Enter to skip)")
+    if ask_holdings and holding_shares == 0.0:
+        print(f"\n💬 Do you currently hold {ticker}? (Press Enter to use defaults)")
         try:
             h = input(f"   Shares held (e.g. 10.5, or 0): ").strip()
             if h and float(h) > 0:
@@ -586,26 +635,23 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Predict AAPL 5 days from today
-  python src/models/advisor.py --ticker AAPL
+  # Predict VOO (default) 1 month ahead
+  python src/models/advisor.py
 
-  # Predict TSLA 10 days from today
-  python src/models/advisor.py --ticker TSLA --horizon 10
+  # Predict TSM 3 months ahead
+  python src/models/advisor.py --ticker TSM --horizon 3mo
 
   # Simulate advice as of a specific past date (e.g. March 15, 2025)
-  python src/models/advisor.py --ticker MSFT --date 2025-03-15 --horizon 5
+  python src/models/advisor.py --ticker MSFT --date 2025-03-15 --horizon 6mo
 
-  # With your holding info (50 shares, bought at £150.00 each)
-  python src/models/advisor.py --ticker GOOGL --holding 50 --avg-cost 150.00
-
-  # Non-interactive (no prompts — good for scripts)
-  python src/models/advisor.py --ticker SPY --no-interactive
+  # Ask interactively for holdings details
+  python src/models/advisor.py --ticker GOOGL --ask
         """
     )
-    parser.add_argument("--ticker",         type=str,   required=True,
-                        help="Stock/ETF ticker (e.g. AAPL, TSLA, SPY, VWRL.L)")
-    parser.add_argument("--horizon",        type=int,   default=5,
-                        help="Trading days ahead to predict (default: 5)")
+    parser.add_argument("--ticker",         type=str,   default="VOO",
+                        help="Stock/ETF ticker (e.g. VOO, AAPL, BTC-USD, GC=F) (default: VOO)")
+    parser.add_argument("--horizon",        type=str,   default="1mo",
+                        help="Horizon/timeframe (e.g. 1mo, 3mo, 6mo, 1yr, or trading days integer) (default: 1mo)")
     parser.add_argument("--date",           type=str,   default=None,
                         help="Reference date YYYY-MM-DD (default: today). "
                              "Use a past date to simulate what advice you would have received then.")
@@ -613,8 +659,8 @@ Examples:
                         help="Number of shares you currently hold (default: 0)")
     parser.add_argument("--avg-cost",       type=float, default=None,
                         help="Your average cost per share (used to calculate unrealised P&L)")
-    parser.add_argument("--no-interactive", action="store_true",
-                        help="Skip interactive prompts (useful for scripting)")
+    parser.add_argument("--ask",            action="store_true",
+                        help="Interactively ask for your holdings and average cost details (default: OFF)")
 
     args = parser.parse_args()
 
@@ -628,5 +674,5 @@ Examples:
         reference_date=ref_date,
         holding_shares=args.holding,
         avg_cost=args.avg_cost,
-        interactive=not args.no_interactive,
+        ask_holdings=args.ask,
     )

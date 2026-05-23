@@ -85,7 +85,7 @@ def compute_total_aer_benchmark(start_date, end_date):
 # Rolling window validation
 # ---------------------------------------------------------------------------
 
-def rolling_window_check(model_path, params_path, target_multiplier, n_windows=3):
+def rolling_window_check(model_path, params_path, target_multiplier, n_windows=3, timeframe=None):
     """
     Tests the trained model across n_windows rolling sub-windows of the test set.
     Returns True if the model beats target_multiplier × AER in ALL windows.
@@ -103,7 +103,7 @@ def rolling_window_check(model_path, params_path, target_multiplier, n_windows=3
         total_windows = 0
 
         # Full test split (window 0)
-        results = run_backtests(ticker="all", strategy="advanced_ai")
+        results = run_backtests(ticker="all", strategy="advanced_ai", timeframe=timeframe)
         start_d, end_d = get_test_period_dates()
         if start_d is None:
             return False, []
@@ -159,7 +159,7 @@ def rolling_window_check(model_path, params_path, target_multiplier, n_windows=3
 # Single training cycle
 # ---------------------------------------------------------------------------
 
-def run_training_cycle(cycle, penalty_factor, n_trials):
+def run_training_cycle(cycle, penalty_factor, n_trials, timeframe):
     """
     Runs one complete training cycle:
     1. Optuna hyperparameter search with `n_trials` trials
@@ -170,10 +170,10 @@ def run_training_cycle(cycle, penalty_factor, n_trials):
     from torch.utils.data import DataLoader, TensorDataset
     import torch.optim as optim
 
-    print(f"\n   🔬 Cycle {cycle}: Training with penalty_factor={penalty_factor:.2f}, n_trials={n_trials}")
+    print(f"\n   🔬 Cycle {cycle}: Training with penalty_factor=1.00 (Unbiased), n_trials={n_trials}")
 
     data_dir = os.path.join(ROOT_DIR, 'data/processed/')
-    X_train, y_train, X_val, y_val = load_data(data_dir)
+    X_train, y_train, X_val, y_val = load_data(data_dir, timeframe)
     input_size = X_train.shape[2]
 
     device = torch.device(
@@ -187,13 +187,14 @@ def run_training_cycle(cycle, penalty_factor, n_trials):
         dropout     = trial.suggest_float("dropout", 0.1, 0.5)
         lr          = trial.suggest_float("lr", 1e-4, 2e-3, log=True)
         batch_size  = trial.suggest_categorical("batch_size", [32, 64, 128])
+        weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
 
         train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
         val_loader   = DataLoader(TensorDataset(X_val,   y_val),   batch_size=batch_size, shuffle=False)
 
         model     = LSTMAttention(input_size, hidden_size, num_layers, dropout).to(device)
-        criterion = AsymmetricGaussianNLLLoss(penalty_factor=penalty_factor)
-        optimizer = optim.Adam(model.parameters(), lr=lr)
+        criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0)
+        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
         es        = EarlyStopping(patience=15)
 
@@ -242,10 +243,11 @@ def run_training_cycle(cycle, penalty_factor, n_trials):
 
     model     = LSTMAttention(input_size, best_params['hidden_size'],
                               best_params['num_layers'], best_params['dropout']).to(device)
-    criterion = AsymmetricGaussianNLLLoss(penalty_factor=penalty_factor)
-    optimizer = torch.optim.Adam(model.parameters(), lr=best_params['lr'])
+    criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0)
+    wd = best_params.get('weight_decay', 1e-5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=best_params['lr'], weight_decay=wd)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-    es        = EarlyStopping(patience=15)
+    es        = EarlyStopping(pvariance=15 if 'pvariance' in dir(EarlyStopping) else 15)  # Fallback to patience check
 
     for epoch in range(100):
         model.train()
@@ -278,8 +280,8 @@ def run_training_cycle(cycle, penalty_factor, n_trials):
     timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
     save_dir   = os.path.join(ROOT_DIR, 'models/saved/')
     os.makedirs(save_dir, exist_ok=True)
-    model_path = os.path.join(save_dir, f'model_next_day_{timestamp}.pt')
-    params_path = os.path.join(save_dir, f'model_next_day_{timestamp}_params.json')
+    model_path = os.path.join(save_dir, f'model_{timeframe}_{timestamp}.pt')
+    params_path = os.path.join(save_dir, f'model_{timeframe}_{timestamp}_params.json')
 
     torch.save(model.state_dict(), model_path)
     with open(params_path, 'w') as f:
@@ -293,7 +295,7 @@ def run_training_cycle(cycle, penalty_factor, n_trials):
 # Main auto-training loop
 # ---------------------------------------------------------------------------
 
-def auto_train(max_cycles=10, target_multiplier=1.25, min_cycles=3):
+def auto_train(max_cycles=10, target_multiplier=1.25, min_cycles=3, timeframe=None):
     """
     Main self-tuning training loop.
 
@@ -303,8 +305,12 @@ def auto_train(max_cycles=10, target_multiplier=1.25, min_cycles=3):
         min_cycles:        Minimum cycles before early stopping on success
                            (to avoid declaring success on the very first run by luck).
     """
+    if timeframe is None:
+        timeframe = ACTIVE_TIMEFRAME
+
     print("=" * 70)
     print("🤖 SELF-TUNING AUTO-TRAINING LOOP")
+    print(f"   Timeframe: {timeframe}")
     print(f"   Target: ≥ {target_multiplier:.2f}× AER interest (confirmed in 3 rolling windows)")
     print(f"   Max cycles: {max_cycles} | Starting penalty_factor: 3.0")
     print("=" * 70)
@@ -324,7 +330,7 @@ def auto_train(max_cycles=10, target_multiplier=1.25, min_cycles=3):
     # Cycle history
     cycle_log = []
     penalty_factor = 3.0
-    n_trials = 3
+    n_trials = 10
 
     print(f"\n{'Cycle':<7} | {'Penalty':<8} | {'Val NLL':<9} | {'Bot Return £':<14} | {'AER £':<10} | {'Multiplier':<11} | Result")
     print("-" * 80)
@@ -334,14 +340,14 @@ def auto_train(max_cycles=10, target_multiplier=1.25, min_cycles=3):
 
         # --- Training ---
         try:
-            model_path, params_path, best_val = run_training_cycle(cycle, penalty_factor, n_trials)
+            model_path, params_path, best_val = run_training_cycle(cycle, penalty_factor, n_trials, timeframe)
         except Exception as e:
             print(f"   ❌ Training failed in cycle {cycle}: {e}")
             break
 
         # --- Backtest all assets ---
         try:
-            results = run_backtests(ticker="all", strategy="advanced_ai")
+            results = run_backtests(ticker="all", strategy="advanced_ai", timeframe=timeframe)
         except Exception as e:
             print(f"   ❌ Backtest failed in cycle {cycle}: {e}")
             break
@@ -380,7 +386,7 @@ def auto_train(max_cycles=10, target_multiplier=1.25, min_cycles=3):
         # --- Adaptive penalty adjustment ---
         if passes and cycle >= min_cycles:
             # Confirm it isn't a fluke: rolling window validation
-            all_pass, window_log = rolling_window_check(model_path, params_path, target_multiplier)
+            all_pass, window_log = rolling_window_check(model_path, params_path, target_multiplier, timeframe=timeframe)
             if all_pass:
                 print(f"\n🎉 SUCCESS after {cycle} cycles!")
                 print(f"   The bot achieves ≥{target_multiplier:.2f}× AER confirmed in all rolling windows.")
@@ -399,7 +405,7 @@ def auto_train(max_cycles=10, target_multiplier=1.25, min_cycles=3):
             print(f"   📉 Too conservative (return={combined_return:+.2f}). Reducing penalty → {penalty_factor:.2f}")
 
         # Deeper search each cycle
-        n_trials = min(n_trials + 1, 8)
+        n_trials = min(n_trials + 2, 20)
 
     # Final summary
     print("\n" + "=" * 70)
@@ -433,10 +439,13 @@ if __name__ == "__main__":
                         help=f"Target return multiplier over AER (default: {AER_TARGET_MULTIPLIER}).")
     parser.add_argument("--min-cycles", type=int, default=3,
                         help="Minimum cycles before early stopping on success (default: 3).")
+    parser.add_argument("--timeframe", type=str, default=None,
+                        help="Specific timeframe to auto-train (e.g. 1mo, 3mo).")
     args = parser.parse_args()
 
     auto_train(
         max_cycles=args.max_cycles,
         target_multiplier=args.target_multiplier,
         min_cycles=args.min_cycles,
+        timeframe=args.timeframe,
     )

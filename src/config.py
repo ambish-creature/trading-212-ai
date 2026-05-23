@@ -58,34 +58,75 @@ AER_TARGET_MULTIPLIER = 1.25
 # Multi-Asset & Categories Configuration
 # ---------------------------------------------------------------------------
 ASSETS = {
+    # Default S&P 500 & ETFs
+    "VOO":    "ETF",
     "SPY":    "ETF",
     "VWRL.L": "ETF",
     "IWY":    "ETF",
     "AIQ":    "ETF",
+    
+    # World's Top 20 Most Traded Stocks
+    "AAPL":   "Tech",
     "MSFT":   "Tech",
-    "TSLA":   "Tech",
-    "ASML":   "Tech",
-    "META":   "Tech",
+    "NVDA":   "Tech",
+    "AMZN":   "Tech",
     "GOOGL":  "Tech",
-    "MCD":    "Consumer",
+    "META":   "Tech",
+    "TSLA":   "Tech",
+    "BRK-B":  "Consumer",
+    "LLY":    "Consumer",
+    "JPM":    "Consumer",
+    "AVGO":   "Tech",
+    "TSM":    "Tech",
+    "V":      "Consumer",
+    "NVO":    "Consumer",
+    "UNH":    "Consumer",
+    "MA":     "Consumer",
+    "ASML":   "Tech",
     "COST":   "Consumer",
-    "YUM":    "Consumer"
+    "NFLX":   "Tech",
+    "AMD":    "Tech",
+    
+    # Cryptocurrencies
+    "BTC-USD": "Crypto",
+    
+    # Commodities
+    "CL=F":    "Commodity",
+    "GC=F":    "Commodity",
+    "SI=F":    "Commodity"
 }
-CATEGORIES = ["ETF", "Tech", "Consumer"]
+CATEGORIES = ["ETF", "Tech", "Consumer", "Crypto", "Commodity"]
 
 TICKER_MAPPING = {
+    "VOO":    "VOO_US_EQ",
     "SPY":    "SPY_US_EQ",
     "VWRL.L": "VWRL_LSE_EQ",
     "IWY":    "IWY_US_EQ",
     "AIQ":    "AIQ_US_EQ",
+    "AAPL":   "AAPL_US_EQ",
     "MSFT":   "MSFT_US_EQ",
-    "TSLA":   "TSLA_US_EQ",
-    "ASML":   "ASML_US_EQ",
-    "META":   "META_US_EQ",
+    "NVDA":   "NVDA_US_EQ",
+    "AMZN":   "AMZN_US_EQ",
     "GOOGL":  "GOOGL_US_EQ",
-    "MCD":    "MCD_US_EQ",
+    "META":   "META_US_EQ",
+    "TSLA":   "TSLA_US_EQ",
+    "BRK-B":  "BRKB_US_EQ",
+    "LLY":    "LLY_US_EQ",
+    "JPM":    "JPM_US_EQ",
+    "AVGO":   "AVGO_US_EQ",
+    "TSM":    "TSM_US_EQ",
+    "V":      "V_US_EQ",
+    "NVO":    "NVO_US_EQ",
+    "UNH":    "UNH_US_EQ",
+    "MA":     "MA_US_EQ",
+    "ASML":   "ASML_US_EQ",
     "COST":   "COST_US_EQ",
-    "YUM":    "YUM_US_EQ"
+    "NFLX":   "NFLX_US_EQ",
+    "AMD":    "AMD_US_EQ",
+    "BTC-USD": "BTC_USD",
+    "CL=F":    "OIL_USD",
+    "GC=F":    "GOLD_USD",
+    "SI=F":    "SILVER_USD"
 }
 INVERSE_MAPPING = {v: k for k, v in TICKER_MAPPING.items()}
 
@@ -94,37 +135,49 @@ INVERSE_MAPPING = {v: k for k, v in TICKER_MAPPING.items()}
 # ---------------------------------------------------------------------------
 
 TIMEFRAME_PROFILES = {
-    "next_day": {
+    "1mo": {
         "interval": "1d",
         "fetch_period": "10y",
-        "seq_length": 60,   # 60 days of history
-        "target_shift": 1   # predict 1 interval ahead
+        "seq_length": 60,
+        "target_shift": 21
     },
-    "next_week": {
-        "interval": "1wk",
-        "fetch_period": "max",
-        "seq_length": 12,   # 12 weeks of history
-        "target_shift": 1   # predict 1 interval ahead
+    "2mo": {
+        "interval": "1d",
+        "fetch_period": "10y",
+        "seq_length": 60,
+        "target_shift": 42
     },
-    "next_month": {
-        "interval": "1mo",
-        "fetch_period": "max",
-        "seq_length": 12,   # 12 months of history
-        "target_shift": 1   # predict 1 interval ahead
+    "3mo": {
+        "interval": "1d",
+        "fetch_period": "10y",
+        "seq_length": 60,
+        "target_shift": 63
     },
-    "next_year": {
-        "interval": "1mo",
-        "fetch_period": "max",
-        "seq_length": 24,   # 24 months of history
-        "target_shift": 12  # predict 12 intervals (months) ahead
+    "6mo": {
+        "interval": "1d",
+        "fetch_period": "10y",
+        "seq_length": 60,
+        "target_shift": 126
     },
-    "next_5_years": {
-        "interval": "1mo",
-        "fetch_period": "max",
-        "seq_length": 60,   # 5 years of history
-        "target_shift": 60  # predict 60 intervals (months) ahead
+    "9mo": {
+        "interval": "1d",
+        "fetch_period": "10y",
+        "seq_length": 60,
+        "target_shift": 189
+    },
+    "1yr": {
+        "interval": "1d",
+        "fetch_period": "10y",
+        "seq_length": 60,
+        "target_shift": 252
+    },
+    "2yr": {
+        "interval": "1d",
+        "fetch_period": "10y",
+        "seq_length": 60,
+        "target_shift": 504
     }
 }
 
 # Change this to switch what the AI is predicting
-ACTIVE_TIMEFRAME = "next_day"
+ACTIVE_TIMEFRAME = "1mo"

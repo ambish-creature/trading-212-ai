@@ -66,7 +66,7 @@ def prepare_live_input(ticker, profile, scaler, feature_cols):
 # 2. Monte Carlo Dropout Prediction
 # ---------------------------------------------------------------------------
 
-def mc_dropout_predict(model, input_tensor, device, n_samples=100):
+def mc_dropout_predict(model, input_tensor, device, n_samples=100, median_uncertainty=None):
     """
     Runs Monte Carlo Dropout: performs n_samples forward passes
     with dropout ENABLED to get a distribution of predictions.
@@ -104,10 +104,14 @@ def mc_dropout_predict(model, input_tensor, device, n_samples=100):
     total_uncertainty = np.sqrt(mc_std**2 + avg_model_sigma**2)
     
     # Confidence score (0-100%)
-    # We map uncertainty to confidence using an exponential decay
-    # Lower uncertainty = higher confidence
-    # (Scaled for percentage points: total_uncertainty of 1% is 1.0, hence * 0.5 instead of * 50)
-    confidence = max(0, min(100, 100 * np.exp(-total_uncertainty * 0.5)))
+    # We use a ratio-based calibrated confidence (dimensionless, self-calibrating across all assets & timeframes)
+    # Ratio of epistemic uncertainty to aleatoric uncertainty (mc_std / avg_model_sigma)
+    ratio = mc_std / (avg_model_sigma + 1e-9)
+    k = 7.0
+    baseline_ratio = 0.50
+    confidence = 100.0 / (1.0 + np.exp(k * (ratio - baseline_ratio)))
+
+
     
     # Error range (10th-90th percentile from MC samples)
     lower_bound = np.percentile(all_mu, 10)
@@ -190,7 +194,9 @@ def predict(ticker="AAPL"):
     model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
     
     # 5. Run Monte Carlo Dropout prediction
-    result = mc_dropout_predict(model, input_tensor, device, n_samples=100)
+    med_u = best_params.get('median_uncertainty', None)
+    result = mc_dropout_predict(model, input_tensor, device, n_samples=100, median_uncertainty=med_u)
+
     
     # 6. Convert returns to prices (divide returns by 100 since they are in percentage points)
     predicted_price = current_price * (1 + result['predicted_return'] / 100.0)

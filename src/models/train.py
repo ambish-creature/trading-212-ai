@@ -49,6 +49,7 @@ class LSTMAttention(nn.Module):
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0
         )
+        self.lstm_dropout = nn.Dropout(dropout)
         self.attention = Attention(hidden_size)
         
         # Head 1: Predicts the mean return (mu)
@@ -67,10 +68,11 @@ class LSTMAttention(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(hidden_size // 2, 1)
         )
-
+ 
     def forward(self, x):
         # x shape: (batch_size, seq_length, input_size)
         lstm_out, _ = self.lstm(x)
+        lstm_out = self.lstm_dropout(lstm_out)
         
         # Pass sequence through attention
         attn_out = self.attention(lstm_out)
@@ -131,12 +133,14 @@ class AsymmetricGaussianNLLLoss(nn.Module):
 # 3. Training Loop & Optuna Objective
 # ---------------------------------------------------------------------------
 
-def load_data(data_dir):
+GLOBAL_TIMEFRAME = ACTIVE_TIMEFRAME
+
+def load_data(data_dir, timeframe):
     """Loads processed numpy arrays and creates DataLoaders."""
-    X_train = torch.tensor(np.load(os.path.join(data_dir, 'X_train.npy')), dtype=torch.float32)
-    y_train = torch.tensor(np.load(os.path.join(data_dir, 'y_train.npy')), dtype=torch.float32)
-    X_val = torch.tensor(np.load(os.path.join(data_dir, 'X_val.npy')), dtype=torch.float32)
-    y_val = torch.tensor(np.load(os.path.join(data_dir, 'y_val.npy')), dtype=torch.float32)
+    X_train = torch.tensor(np.load(os.path.join(data_dir, f'X_train_{timeframe}.npy')), dtype=torch.float32)
+    y_train = torch.tensor(np.load(os.path.join(data_dir, f'y_train_{timeframe}.npy')), dtype=torch.float32)
+    X_val = torch.tensor(np.load(os.path.join(data_dir, f'X_val_{timeframe}.npy')), dtype=torch.float32)
+    y_val = torch.tensor(np.load(os.path.join(data_dir, f'y_val_{timeframe}.npy')), dtype=torch.float32)
     
     return X_train, y_train, X_val, y_val
 
@@ -149,10 +153,11 @@ def objective(trial):
     dropout = trial.suggest_float("dropout", 0.1, 0.5)
     lr = trial.suggest_float("lr", 1e-4, 2e-3, log=True)
     batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
+    weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
     
     # Load Data
     data_dir = os.path.join(os.path.dirname(__file__), '../../data/processed/')
-    X_train, y_train, X_val, y_val = load_data(data_dir)
+    X_train, y_train, X_val, y_val = load_data(data_dir, GLOBAL_TIMEFRAME)
     input_size = X_train.shape[2]
     
     train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
@@ -165,8 +170,8 @@ def objective(trial):
     # Gaussian NLL naturally punishes confident wrong answers heavily:
     #   loss = 0.5 * [log(sigma^2) + (target - mu)^2 / sigma^2]
     model = LSTMAttention(input_size, hidden_size, num_layers, dropout).to(device)
-    criterion = AsymmetricGaussianNLLLoss(penalty_factor=3.0)
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0)
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
     
     # Learning Rate Scheduler (Reduce LR on plateau)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
@@ -225,7 +230,7 @@ def train_and_save_final_model(best_params):
     """Trains the model on the optimal parameters and saves a timestamped backup."""
     print("\n--- Training Final Model with Best Parameters ---")
     data_dir = os.path.join(os.path.dirname(__file__), '../../data/processed/')
-    X_train, y_train, X_val, y_val = load_data(data_dir)
+    X_train, y_train, X_val, y_val = load_data(data_dir, GLOBAL_TIMEFRAME)
     input_size = X_train.shape[2]
     
     batch_size = best_params['batch_size']
@@ -241,10 +246,11 @@ def train_and_save_final_model(best_params):
         dropout=best_params['dropout']
     ).to(device)
     
-    criterion = AsymmetricGaussianNLLLoss(penalty_factor=3.0)
-    optimizer = optim.Adam(model.parameters(), lr=best_params['lr'])
+    criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0)
+    wd = best_params.get('weight_decay', 1e-5)
+    optimizer = optim.Adam(model.parameters(), lr=best_params['lr'], weight_decay=wd)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-    early_stopping = EarlyStopping(patience=15)
+    early_stopping = EarlyStopping(patience=25)
     
     epochs = 100
     for epoch in range(epochs):
@@ -276,31 +282,70 @@ def train_and_save_final_model(best_params):
             print(f"Early stopping triggered at epoch {epoch}")
             break
             
+    # Compute median uncertainty on the validation split for self-calibration
+    model.eval()
+    val_uncertainties = []
+    with torch.no_grad():
+        for batch_X, _ in val_loader:
+            batch_X = batch_X.to(device)
+            _, log_sigma = model(batch_X)
+            sigma = torch.exp(log_sigma)
+            val_uncertainties.extend(sigma.cpu().numpy().tolist())
+    median_u = float(np.median(val_uncertainties))
+    best_params['median_uncertainty'] = median_u
+    print(f"📊 Computed Validation Median Uncertainty: {median_u:.4f}")
+
     # Save the model and its parameters to create a backup
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_dir = os.path.join(save_dir, f'model_{GLOBAL_TIMEFRAME}_{timestamp}.pt') if 'save_dir' in locals() else os.path.join(os.path.dirname(__file__), '../../models/saved/')
     save_dir = os.path.join(os.path.dirname(__file__), '../../models/saved/')
     os.makedirs(save_dir, exist_ok=True)
     
-    model_path = os.path.join(save_dir, f'model_{ACTIVE_TIMEFRAME}_{timestamp}.pt')
+    model_path = os.path.join(save_dir, f'model_{GLOBAL_TIMEFRAME}_{timestamp}.pt')
     torch.save(model.state_dict(), model_path)
     print(f"\n✅ Final model successfully backed up to: {model_path}")
     
-    params_path = os.path.join(save_dir, f'model_{ACTIVE_TIMEFRAME}_{timestamp}_params.json')
+    params_path = os.path.join(save_dir, f'model_{GLOBAL_TIMEFRAME}_{timestamp}_params.json')
     with open(params_path, 'w') as f:
         json.dump(best_params, f, indent=4)
     print(f"✅ Hyperparameters backed up to: {params_path}")
 
+
 if __name__ == "__main__":
-    print("Starting Hyperparameter Tuning with Optuna...")
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=3)
-    
-    print("\nBest Trial:")
-    trial = study.best_trial
-    print(f"  Value (Validation Gaussian NLL): {trial.value}")
-    print("  Params: ")
-    for key, value in trial.params.items():
-        print(f"    {key}: {value}")
+    import argparse
+    parser = argparse.ArgumentParser(description="Unbiased LSTMAttention Trainer.")
+    parser.add_argument("--timeframe", type=str, default=None,
+                        help="Specific timeframe/horizon to train (e.g. 1mo, 3mo).")
+    parser.add_argument("--trials", type=int, default=15,
+                        help="Number of Optuna trials (default: 15). Set to 0 to train directly with default parameters.")
+    args = parser.parse_args()
+    if args.timeframe:
+        GLOBAL_TIMEFRAME = args.timeframe
+
+    if args.trials == 0:
+        print(f"Bypassing Optuna hyperparameter tuning. Training model directly with default robust parameters for timeframe: {GLOBAL_TIMEFRAME}...")
+        default_params = {
+            "hidden_size": 64,
+            "num_layers": 2,
+            "dropout": 0.2,
+            "lr": 3e-4,
+            "batch_size": 64,
+            "weight_decay": 1e-5
+        }
+
+        train_and_save_final_model(default_params)
+    else:
+        print(f"Starting Hyperparameter Tuning with Optuna ({args.trials} trials) for timeframe: {GLOBAL_TIMEFRAME}...")
+        study = optuna.create_study(direction="minimize")
+        study.optimize(objective, n_trials=args.trials)
         
-    # Automatically train and backup the best model
-    train_and_save_final_model(trial.params)
+        print("\nBest Trial:")
+        trial = study.best_trial
+        print(f"  Value (Validation Gaussian NLL): {trial.value}")
+        print("  Params: ")
+        for key, value in trial.params.items():
+            print(f"    {key}: {value}")
+            
+        # Automatically train and backup the best model
+        train_and_save_final_model(trial.params)
+

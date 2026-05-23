@@ -190,12 +190,15 @@ def create_sequences(features, targets, seq_length):
     return np.array(xs), np.array(ys)
 
 
-def process_all_data():
+def process_all_data(timeframe=None):
+    if timeframe is None:
+        timeframe = ACTIVE_TIMEFRAME
+
     print("=" * 60)
-    print("🧠 STARTING RICH MULTI-SOURCE DATA PREPROCESSOR")
+    print(f"🧠 STARTING RICH MULTI-SOURCE DATA PREPROCESSOR FOR TIMEFRAME: {timeframe}")
     print("=" * 60)
 
-    profile = TIMEFRAME_PROFILES[ACTIVE_TIMEFRAME]
+    profile = TIMEFRAME_PROFILES[timeframe]
     seq_length   = profile['seq_length']
     target_shift = profile['target_shift']
 
@@ -278,7 +281,7 @@ def process_all_data():
     scaler = StandardScaler()
     scaler.fit(all_train_numeric)
 
-    with open(os.path.join(processed_dir, 'scaler.pkl'), 'wb') as f:
+    with open(os.path.join(processed_dir, f'scaler_{timeframe}.pkl'), 'wb') as f:
         pickle.dump(scaler, f)
     print(f"   ✅ Scaler fitted on {all_train_numeric.shape[0]:,} samples × {all_train_numeric.shape[1]} features")
 
@@ -319,8 +322,8 @@ def process_all_data():
         val_X_list.append(X_val)
         val_y_list.append(y_val)
 
-        np.save(os.path.join(processed_dir, f'{ticker}_X_test.npy'), X_test)
-        np.save(os.path.join(processed_dir, f'{ticker}_y_test.npy'), y_test)
+        np.save(os.path.join(processed_dir, f'{ticker}_X_test_{timeframe}.npy'), X_test)
+        np.save(os.path.join(processed_dir, f'{ticker}_y_test_{timeframe}.npy'), y_test)
         print(f"   ✅ {ticker}: train={X_train.shape}, val={X_val.shape}, test={X_test.shape}")
 
     # ---- Step 4: Stack + shuffle training set ----
@@ -333,12 +336,12 @@ def process_all_data():
     X_train_all = X_train_all[shuffle_idx]
     y_train_all = y_train_all[shuffle_idx]
 
-    np.save(os.path.join(processed_dir, 'X_train.npy'), X_train_all)
-    np.save(os.path.join(processed_dir, 'y_train.npy'), y_train_all)
-    np.save(os.path.join(processed_dir, 'X_val.npy'),   X_val_all)
-    np.save(os.path.join(processed_dir, 'y_val.npy'),   y_val_all)
+    np.save(os.path.join(processed_dir, f'X_train_{timeframe}.npy'), X_train_all)
+    np.save(os.path.join(processed_dir, f'y_train_{timeframe}.npy'), y_train_all)
+    np.save(os.path.join(processed_dir, f'X_val_{timeframe}.npy'),   X_val_all)
+    np.save(os.path.join(processed_dir, f'y_val_{timeframe}.npy'),   y_val_all)
 
-    with open(os.path.join(processed_dir, 'feature_cols.pkl'), 'wb') as f:
+    with open(os.path.join(processed_dir, f'feature_cols_{timeframe}.pkl'), 'wb') as f:
         pickle.dump(all_feature_cols, f)
 
     print("\n" + "=" * 60)
@@ -357,4 +360,9 @@ def process_all_data():
 
 
 if __name__ == "__main__":
-    process_all_data()
+    import argparse
+    parser = argparse.ArgumentParser(description="Multi-horizon preprocessor.")
+    parser.add_argument("--timeframe", type=str, default=None,
+                        help="Specific timeframe (e.g. 1mo, 3mo). Defaults to ACTIVE_TIMEFRAME.")
+    args = parser.parse_args()
+    process_all_data(timeframe=args.timeframe)

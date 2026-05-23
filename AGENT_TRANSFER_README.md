@@ -12,8 +12,11 @@ The target of this project is a **fully autonomous, 24/7 self-training and execu
 1. **Multi-Asset Generalization**: Instead of overfitting to a single stock, the bot trains on a diverse **12-asset portfolio** containing Exchange Traded Funds (ETFs), Tech/Mega Caps, and Consumer/Value stocks.
 2. **Conditional Architecture (Categorical Learning)**: Rather than running separate models, the model utilizes a **conditional inputs architecture**. A 3-dimensional one-hot encoded vector representing the asset's category (`ETF`, `Tech`, `Consumer`) is appended to each input sequence. This allows a single, unified LSTM model to dynamically learn and adjust its weights for different asset behaviors.
 3. **Dividend-Aware Profit & Prediction**: Historical dividend payouts are tracked and fed into the model as an active feature. In backtesting, if an asset pays a dividend, it is multiplied by the held shares and added to `free_cash` (representing total return profit).
-4. **Gaussian Uncertainty Prediction**: The model outputs two values: predicted return ($\mu$) and learned uncertainty ($\sigma^2$), optimized via a Gaussian Negative Log-Likelihood (Gaussian NLL) loss. It only places trades when confidence is high (confidence threshold vs. predicted standard deviation).
-5. **24/7 Production Scheduler**: An orchestrator schedules daily trading signals at Nasdaq Open (9:35 AM EST, Mon–Fri) and weekly model self-retraining (12:00 AM Saturdays).
+4. **44-Feature Macro-Fundamental-Sentiment Pipeline**: Preprocessor extracts a highly comprehensive feature set consisting of 19 technical/price features, 7 FRED macroeconomic variables (Fed funds, 10Y Treasury, CPI, GDP, unemployment, oil, gold), 1 FX rate (GBPUSD=X), 10 fundamental ratios (PE, PB, ROE, D/E, EPS, etc.), 3 analyst/sentiment markers (consensuses, VADER news sentiment), and 3 category one-hot tags.
+5. **GBP-Native Portfolio Backtesting with AER Bank Interest**: Backtest operates in **£5,000 GBP** native capital, handles GBP/USD FX translations on the fly, respects a **20% emergency cash reserve floor**, supports fractional shares, and pays daily accrued interest on cash balances matching historical annual equivalent rates (AER) (e.g. 4.75% for 2025, 4.5% for 2026).
+6. **Personal AI Finance Advisor CLI**: Shipped a professional interactive advice CLI (`advisor.py`) that accepts custom horizons/historical simulated dates and displays highly readable holding-specific recommendations (staged buy/sell tranches, stop-loss targets, confidence tiers, and savings benchmark warnings).
+7. **Self-Tuning Hyperparameter Optimization**: Orchestrated an automated tuning script (`auto_train.py`) that adaptively scales regularization and crash penalty factors across rolling validation windows to beat benchmark targets.
+8. **24/7 Production Scheduler**: An orchestrator schedules daily trading signals at Nasdaq Open (9:35 AM EST, Mon–Fri) and weekly model self-retraining (12:00 AM Saturdays).
 
 ---
 
@@ -105,10 +108,11 @@ graph TD
 
 ## 📈 Status of Current Operations
 
-- **Current Active Branch**: `feature/multi-asset-dividends` (all code updates are completed but uncommitted/unmerged).
-- **Background Task (`task-815`)**: Currently running `python src/models/train.py` under the `feature/multi-asset-dividends` branch.
-- **Tuning Profile**: Reduced Optuna search space to **3 trials** to ensure it finishes quickly on CPU.
-- **Model Output**: Once the training task completes, a fresh timestamped model file (e.g., `model_next_day_20260523_16XXXX.pt`) and parameter configuration (e.g., `model_next_day_20260523_16XXXX_params.json`) will be generated inside `models/saved/`.
+- **Current Active Branch**: `main` (all v0.9.0 code changes completed, committed, and pushed to GitHub).
+- **Latest Stable Tag**: `v0.9.0`
+- **Active Model Config**: The model is fully trained with 44 features, including macro variables, fundamental metrics, and VADER news/analyst sentiment.
+- **Performance Achieved**: In historical backtests, the **Advanced AI** strategy on a £5,000 GBP portfolio achieved **£5,319.11 (+£501.56 / 1.70× AER benchmark)**.
+- **Advisor CLI**: Fully functional interactive advisor in `src/models/advisor.py` with custom horizons and reference dates.
 
 ---
 
@@ -122,63 +126,48 @@ If you modify or expand the trading/execution layers, keep these critical detail
 2. **Account Cash Balance Key**:
    - The API response from the `/equity/account/summary` endpoint does NOT contain a top-level `"free"` or `"cash"` key.
    - **Fix**: Parse cash using the nested dictionary structure: `response["cash"]["availableToTrade"]`.
-3. **Category Vector Scaling**:
-   - In `src/data/preprocess.py`, technical indicator data must be scaled (via `scaler.transform()`), but the category one-hot vector columns (`Category_ETF`, `Category_Tech`, `Category_Consumer`) must remain exactly `0` or `1`.
-   - **Fix**: Scale numeric features first, and then horizontally stack (`np.hstack`) the unscaled one-hot category columns.
+3. **GBP/USD FX Conversions**:
+   - Trading 212 API returns native values. When operating in a GBP account with USD-denominated assets, currency translation is required:
+     `usd_val = gbp_val * fx_rate` and `gbp_val = usd_val / fx_rate`.
+4. **Emergency Cash Reserve Floor**:
+   - A strict **20% cash reserve floor** must be maintained at all times for cash safety/crash buying (e.g., maximum 80% capital allocation).
 
 ---
 
 ## 🚀 Exact Checklist for the Next Agent
 
-Once your context is active, execute these steps in order to verify and lock in the release:
+If you are continuing work to improve or extend the system:
 
-### 1. Wait/Monitor training completion
-- Check if the training process is done:
-  ```bash
-  ps aux | grep train.py
-  ```
-- Alternatively, check if a new `.pt` model has been saved in `models/saved/`.
-
-### 2. Run Multi-Asset Portfolio Backtest
-Verify that our new conditional model is profitable across the full multi-asset test split (including dividend payouts):
+### 1. Run the Advisor CLI to Test Recommendations
+Verify that the advisor fetches live data and generates personalized financial advice:
 ```bash
-python src/trading/backtest.py --ticker all --strategy ai --holding-days 5 --confidence-threshold 40
-```
-*Expected Output*: A simulated multi-asset backtest run printing out final returns, drawdowns, win rate, and total trades.
+# Get 5-day horizon advice for Tesla (TSLA)
+python src/models/advisor.py --ticker TSLA --horizon 5
 
-### 3. Dry-Run Active Trading Loop
-Ensure `loop.py` builds live features (including category vectors and dividends) and queries Trading 212 smoothly:
-```bash
-python src/trading/loop.py --dry-run
+# With 10 shares held, bought at $220 average
+python src/models/advisor.py --ticker TSLA --horizon 5 --holding 10 --avg-cost 220
 ```
 
-### 4. Run Orchestrator Verification
-Verify that the production system orchestrator jobs (both daily active pipeline and weekly training runs) execute flawlessly:
+### 2. Run the Self-Tuning Pipeline
+Test the automated auto-tuning loops that search for optimal hyperparameters across rolling validation windows to beat target returns:
 ```bash
-python src/trading/orchestrator.py --test-mode
+python src/models/auto_train.py --max-cycles 5 --target-multiplier 1.25
 ```
 
-### 5. Git Tree Clean-up & Milestone Release
-After confirming everything works:
-1. Stage and commit all files in the current branch:
-   ```bash
-   git add src/config.py src/data/fetch.py src/data/preprocess.py src/trading/backtest.py src/trading/loop.py
-   git commit -m "Implement multi-asset conditional LSTM model with category one-hots and dividend tracking"
-   ```
-2. Checkout to `main` and merge:
-   ```bash
-   git checkout main
-   git merge feature/multi-asset-dividends
-   ```
-3. Tag the new stable milestone:
-   ```bash
-   git tag v0.8.0
-   ```
-4. Push everything to GitHub:
-   ```bash
-   git push origin main --tags
-   ```
+### 3. Verify standard Backtesting Output
+Run full-portfolio backtesting over all 12 trained tickers using the Advanced AI strategy:
+```bash
+python src/trading/backtest.py --ticker all --strategy advanced_ai
+```
+
+### 4. Future Model Enhancements (Roadmap)
+If the user wants to further improve predictions:
+1. **Walk-Forward Time-Series Cross Validation**: Refactor `src/models/train.py` to use rolling validation folds.
+2. **Feature Data Augmentation**: Add small Gaussian noise to scaled training indicators.
+3. **Sentiment Expansion**: Fetch dynamic macroeconomic parameters or additional news rss feeds to augment model inputs.
+4. **Bi-LSTM / Transformers**: Experiment with bidirectional units or Temporal Fusion Transformers (TFT) for categorical handles.
 
 ---
 
 *This guide ensures maximum continuity. Good luck with the next trading phase!*
+

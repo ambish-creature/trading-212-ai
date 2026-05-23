@@ -14,7 +14,9 @@ We have successfully implemented and verified several advanced Deep Learning and
 * **[x] Real-time Dividend Payout & Tracking**: Integrated historical dividends into data fetching/preprocessing as a feature, and added daily dividend payout tracking (`qty * dividend_per_share` added to available cash) in both the backtest simulation and active live trading engine.
 * **[x] Robust Regularization & Early Stopping**: Added dropout layers (configured up to 50%), gradient clipping, dynamic learning rate plateau scheduler, and an automated **Early Stopping** class to halt training when validation NLL loss stops improving.
 * **[x] Unified Data Scaling**: Preprocessed all assets under a single global `StandardScaler` fitted on stacked training splits, ensuring robust and uniform indicator scaling while preserving one-hot categorical flags.
-* **[x] 24/7 Production Scheduler**: Added an autonomous `orchestrator.py` that schedules Nasdaq-Open execution loops (9:35 AM EST, Mon–Fri) and weekly model retraining (12:00 AM Saturdays).
+* [x] **24/7 Production Scheduler**: Added an autonomous `orchestrator.py` that schedules Nasdaq-Open execution loops (9:35 AM EST, Mon–Fri) and weekly model retraining (12:00 AM Saturdays).
+* [x] **Personal AI Finance Advisor CLI**: Implemented a comprehensive command-line financial advisor (`advisor.py`) that outputs tailored, actionable buy/sell/hold suggestions, price targets, risk notes, and structured profit-taking/loss-cutting timelines based on user holdings and arbitrary prediction horizons/dates.
+* [x] **Self-Tuning Training Loop**: Created a automated tuning pipeline (`auto_train.py`) that optimizes hyperparameters (like penalty factors for crashing events and dropout rates) automatically across rolling validation splits to ensure the model beats target benchmark metrics.
 
 ---
 

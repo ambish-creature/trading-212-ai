@@ -19,7 +19,13 @@ CONFIDENCE_THRESHOLD = 45.0       # Only trade if model confidence is >= 45%
 MAX_ALLOCATION_PER_TICKER = 0.10   # Max 10% of portfolio value per ticker
 BASE_TRADE_AMOUNT = 1000.0        # Base trade cash size ($1,000)
 
-WATCH_LIST = ["AAPL"]             # Tickers to watch and trade
+WATCH_LIST = ["AAPL"]             # Standard tickers to watch and trade
+
+# T212 API instrument mapping
+TICKER_MAPPING = {
+    "AAPL": "AAPL_US_EQ"
+}
+INVERSE_MAPPING = {v: k for k, v in TICKER_MAPPING.items()}
 
 def run_trading_loop(dry_run=False):
     print("=" * 60)
@@ -47,7 +53,8 @@ def run_trading_loop(dry_run=False):
         print("   No open positions currently.")
     else:
         for pos in positions:
-            ticker = pos.get("ticker")
+            t212_ticker = pos.get("ticker")
+            ticker = INVERSE_MAPPING.get(t212_ticker, t212_ticker)
             qty = float(pos.get("quantity", 0.0))
             price = float(pos.get("currentPrice", 0.0))
             value = qty * price
@@ -57,7 +64,7 @@ def run_trading_loop(dry_run=False):
                 "value": value
             }
             total_holdings_value += value
-            print(f"   • {ticker}: {qty:.4f} shares @ ${price:.2f} (Current Value: ${value:.2f})")
+            print(f"   • {ticker} ({t212_ticker}): {qty:.4f} shares @ ${price:.2f} (Current Value: ${value:.2f})")
 
     portfolio_value = free_cash + total_holdings_value
     print(f"📊 Total Portfolio Value: ${portfolio_value:,.2f}")
@@ -115,6 +122,9 @@ def run_trading_loop(dry_run=False):
         print(f"   Predicted Return: {predicted_return:+.4f}%")
         print(f"   Model Confidence: {confidence:.1f}%")
 
+        # Get the Trading 212 specific ticker symbol
+        t212_ticker = TICKER_MAPPING.get(ticker, ticker)
+
         # 4. Action Logic
         if predicted_return > 0 and confidence >= CONFIDENCE_THRESHOLD:
             # --- BUY SIGNAL ---
@@ -146,14 +156,15 @@ def run_trading_loop(dry_run=False):
                 print("   ⚠️  Insufficient cash to execute trade.")
                 continue
 
-            # Calculate trade quantity
+            # Calculate trade quantity and round to 2 decimal places for T212 compatibility
             qty = trade_cash / current_price
+            qty = round(qty, 2)
             
-            print(f"   💰 Sized Order: Buy {qty:.4f} shares (~${trade_cash:.2f})")
+            print(f"   💰 Sized Order: Buy {qty:.2f} shares of {t212_ticker} (~${trade_cash:.2f})")
             if dry_run:
-                print(f"   📝 [DRY RUN] Simulating BUY order for {qty:.4f} shares of {ticker}.")
+                print(f"   📝 [DRY RUN] Simulating BUY order for {qty:.2f} shares of {t212_ticker}.")
             else:
-                place_market_order(ticker, qty)
+                place_market_order(t212_ticker, qty)
 
         elif predicted_return < 0 and confidence >= CONFIDENCE_THRESHOLD:
             # --- SELL SIGNAL ---
@@ -162,14 +173,14 @@ def run_trading_loop(dry_run=False):
             # Verify if we currently hold this ticker
             held_qty = pos_dict.get(ticker, {}).get("quantity", 0.0)
             if held_qty > 0:
-                print(f"   💰 Sized Order: Liquidate all {held_qty:.4f} shares")
+                print(f"   💰 Sized Order: Liquidate all {held_qty:.4f} shares of {t212_ticker}")
                 if dry_run:
-                    print(f"   📝 [DRY RUN] Simulating SELL order for {held_qty:.4f} shares of {ticker}.")
+                    print(f"   📝 [DRY RUN] Simulating SELL order for {held_qty:.4f} shares of {t212_ticker}.")
                 else:
                     # Trading 212 API places sells by passing a negative quantity
-                    place_market_order(ticker, -held_qty)
+                    place_market_order(t212_ticker, -held_qty)
             else:
-                print("   ℹ️  No open positions currently held. Skipping short-sell.")
+                print(f"   ℹ️  No open positions currently held for {t212_ticker}. Skipping short-sell.")
 
         else:
             print(f"   💤 Signal weak or below confidence threshold ({confidence:.1f}% < {CONFIDENCE_THRESHOLD}%). No action taken.")

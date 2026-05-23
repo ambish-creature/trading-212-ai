@@ -33,7 +33,10 @@ def get_account_cash():
     response = requests.get(url, headers=headers)
     if response.status_code == 200:
         data = response.json()
-        return float(data.get("free", 0.0))
+        # Parse nested cash -> availableToTrade
+        if "cash" in data and isinstance(data["cash"], dict):
+            return float(data["cash"].get("availableToTrade", 0.0))
+        return float(data.get("free", data.get("totalValue", 0.0)))
     else:
         print(f"Failed to fetch account summary: {response.status_code} {response.text}")
         return 0.0

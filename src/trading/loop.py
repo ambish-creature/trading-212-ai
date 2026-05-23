@@ -15,7 +15,7 @@ from src.trading.execution import get_portfolio_positions, get_account_cash, pla
 # ---------------------------------------------------------------------------
 # 1. Trading Configurations & Risk Parameters
 # ---------------------------------------------------------------------------
-CONFIDENCE_THRESHOLD = 45.0       # Only trade if model confidence is >= 45%
+CONFIDENCE_THRESHOLD = 40.0       # Only trade if model confidence is >= 40%
 MAX_ALLOCATION_PER_TICKER = 0.10   # Max 10% of portfolio value per ticker
 BASE_TRADE_AMOUNT = 1000.0        # Base trade cash size ($1,000)
 

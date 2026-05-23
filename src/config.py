@@ -16,6 +16,41 @@ def get_base_url():
     return BASE_URL_DEMO if ENVIRONMENT == "DEMO" else BASE_URL_LIVE
 
 # ---------------------------------------------------------------------------
+# Multi-Asset & Categories Configuration
+# ---------------------------------------------------------------------------
+ASSETS = {
+    "SPY": "ETF",
+    "VWRL.L": "ETF",
+    "IWY": "ETF",
+    "AIQ": "ETF",
+    "MSFT": "Tech",
+    "TSLA": "Tech",
+    "ASML": "Tech",
+    "META": "Tech",
+    "GOOGL": "Tech",
+    "MCD": "Consumer",
+    "COST": "Consumer",
+    "YUM": "Consumer"
+}
+CATEGORIES = ["ETF", "Tech", "Consumer"]
+
+TICKER_MAPPING = {
+    "SPY": "SPY_US_EQ",
+    "VWRL.L": "VWRL_LSE_EQ",
+    "IWY": "IWY_US_EQ",
+    "AIQ": "AIQ_US_EQ",
+    "MSFT": "MSFT_US_EQ",
+    "TSLA": "TSLA_US_EQ",
+    "ASML": "ASML_US_EQ",
+    "META": "META_US_EQ",
+    "GOOGL": "GOOGL_US_EQ",
+    "MCD": "MCD_US_EQ",
+    "COST": "COST_US_EQ",
+    "YUM": "YUM_US_EQ"
+}
+INVERSE_MAPPING = {v: k for k, v in TICKER_MAPPING.items()}
+
+# ---------------------------------------------------------------------------
 # Data & Timeframe Profiles
 # ---------------------------------------------------------------------------
 

@@ -270,7 +270,7 @@ def train_and_save_final_model(best_params):
 if __name__ == "__main__":
     print("Starting Hyperparameter Tuning with Optuna...")
     study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=20)
+    study.optimize(objective, n_trials=3)
     
     print("\nBest Trial:")
     trial = study.best_trial

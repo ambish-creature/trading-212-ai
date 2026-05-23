@@ -7,6 +7,37 @@ def get_auth_header():
     encoded = base64.b64encode(credentials.encode('utf-8')).decode('utf-8')
     return {"Authorization": f"Basic {encoded}"}
 
+def get_portfolio_positions():
+    """
+    Fetches the currently held positions from Trading 212.
+    Returns a list of dictionaries, or an empty list on failure.
+    """
+    url = f"{get_base_url()}/equity/portfolio"
+    headers = get_auth_header()
+    
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        return response.json()
+    else:
+        print(f"Failed to fetch portfolio: {response.status_code} {response.text}")
+        return []
+
+def get_account_cash():
+    """
+    Fetches available cash from Trading 212.
+    Returns free cash amount, or 0.0 on failure.
+    """
+    url = f"{get_base_url()}/equity/account/summary"
+    headers = get_auth_header()
+    
+    response = requests.get(url, headers=headers)
+    if response.status_code == 200:
+        data = response.json()
+        return float(data.get("free", 0.0))
+    else:
+        print(f"Failed to fetch account summary: {response.status_code} {response.text}")
+        return 0.0
+
 def place_market_order(ticker, quantity):
     """
     Places a market order via Trading 212 API.

@@ -34,9 +34,17 @@ warnings.filterwarnings("ignore")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 from src.config import TIMEFRAME_PROFILES, ACTIVE_TIMEFRAME, ASSETS, CATEGORIES
 
-# ---------------------------------------------------------------------------
-# Feature column definitions
-# ---------------------------------------------------------------------------
+# Mapped Sector ETFs for Peer Momentum (v3.0)
+SECTOR_MAP = {
+    "VOO": "SPY", "SPY": "SPY", "VWRL.L": "SPY", "IWY": "SPY", "AIQ": "SPY",
+    "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "AMZN": "XLY", "GOOGL": "XLK",
+    "META": "XLK", "TSLA": "XLY", "AVGO": "XLK", "TSM": "XLK", "ASML": "XLK",
+    "NFLX": "XLY", "AMD": "XLK",
+    "BRK-B": "SPY", "LLY": "XLV", "JPM": "XLF", "V": "XLF", "NVO": "XLV",
+    "UNH": "XLV", "MA": "XLF", "COST": "XLP",
+    "BTC-USD": "SPY", "CL=F": "SPY", "GC=F": "SPY", "SI=F": "SPY"
+}
+
 
 # Core OHLCV + technical features (always present)
 OHLCV_TECH_COLS = [
@@ -45,14 +53,34 @@ OHLCV_TECH_COLS = [
     'RSI', 'MACD', 'MACD_Signal', 'MACD_Hist',
     'BB_High', 'BB_Mid', 'BB_Low', 'BB_Width',
     'ATR_14',
-    'Bid_Ask_Proxy',  # Estimated from (High - Low) / Close
+    'Bid_Ask_Proxy',     # Estimated from (High - Low) / Close
     'Dividends',
+    # --- New features (v2.0) ---
+    'Momentum_5',        # 5-day price momentum (short-term)
+    'Momentum_10',       # 10-day price momentum (medium-term)
+    'Momentum_20',       # 20-day price momentum (trend confirmation)
+    'OBV',               # On-Balance Volume (volume-price divergence)
+    'Vol_Regime',        # Volatility regime: ATR_14 / Close (normalised vol)
+    'Trend_Strength',    # SMA20 / SMA50 ratio (trend direction & strength)
+    'Williams_R',        # Williams %R oscillator (overbought/oversold)
+    'Price_vs_SMA50',    # Close / SMA50 - 1 (distance from medium-term mean)
+    # --- Cross-Asset Sector features (v3.0) ---
+    'Sector_Return_5d',
+    'Sector_Return_20d',
+    'Relative_Strength_5d',
+    'Relative_Strength_20d',
 ]
 
 # Macro features (from macro_combined.csv, forward-filled daily)
 MACRO_COLS = [
     'FedFundsRate', 'US_10Y_Yield', 'CPI_US', 'GDP_US', 'Unemployment',
     'Oil_Price', 'Gold_Price',
+    # --- Cross-Asset Macro features (v3.0) ---
+    'Gold_Return_5d',
+    'Oil_Return_5d',
+    'Safe_Haven_Ratio',
+    'Equity_Gold_Corr',
+    'Equity_Oil_Corr',
 ]
 
 # GBP/USD FX rate
@@ -73,23 +101,42 @@ SENTIMENT_COLS = [
 ALL_NUMERIC_COLS = OHLCV_TECH_COLS + MACRO_COLS + FX_COLS + FUNDAMENTAL_COLS + SENTIMENT_COLS
 
 
-def add_technical_indicators(df, target_shift):
-    """Computes all technical indicators and the prediction target."""
+def wma(series, window):
+    """Computes Weighted Moving Average."""
+    weights = np.arange(1, window + 1)
+    return series.rolling(window).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
+
+
+def hull_moving_average(series, window=14):
+    """Computes lag-free Hull Moving Average."""
+    half_win = int(window / 2)
+    sqrt_win = int(np.sqrt(window))
+    wma_half = wma(series, half_win)
+    wma_full = wma(series, window)
+    diff = 2 * wma_half - wma_full
+    return wma(diff, sqrt_win)
+
+
+def add_technical_indicators(df, ticker, target_shift):
+    """Computes all technical indicators and the prediction target, including sector peer momentum."""
     close = df['Close']
 
-    df['SMA_20']  = close.rolling(window=20).mean()
-    df['SMA_50']  = close.rolling(window=50).mean()
-    df['EMA_12']  = close.ewm(span=12, adjust=False).mean()
-    df['EMA_26']  = close.ewm(span=26, adjust=False).mean()
+    # Denoise close price causally using Hull Moving Average (lag-free)
+    denoised = hull_moving_average(close, window=14).fillna(close)
 
-    df['RSI'] = ta.momentum.RSIIndicator(close=close, window=14).rsi()
+    df['SMA_20']  = denoised.rolling(window=20).mean()
+    df['SMA_50']  = denoised.rolling(window=50).mean()
+    df['EMA_12']  = denoised.ewm(span=12, adjust=False).mean()
+    df['EMA_26']  = denoised.ewm(span=26, adjust=False).mean()
 
-    macd_ind = ta.trend.MACD(close=close)
+    df['RSI'] = ta.momentum.RSIIndicator(close=denoised, window=14).rsi()
+
+    macd_ind = ta.trend.MACD(close=denoised)
     df['MACD']        = macd_ind.macd()
     df['MACD_Signal'] = macd_ind.macd_signal()
     df['MACD_Hist']   = macd_ind.macd_diff()
 
-    bb = ta.volatility.BollingerBands(close=close, window=20, window_dev=2)
+    bb = ta.volatility.BollingerBands(close=denoised, window=20, window_dev=2)
     df['BB_High']  = bb.bollinger_hband()
     df['BB_Mid']   = bb.bollinger_mavg()
     df['BB_Low']   = bb.bollinger_lband()
@@ -100,6 +147,74 @@ def add_technical_indicators(df, target_shift):
 
     # Bid-Ask spread proxy: (High - Low) / Close
     df['Bid_Ask_Proxy'] = (df['High'] - df['Low']) / (close + 1e-9)
+
+    # --- v2.0 Enhanced Features ---
+
+    # Price momentum: percentage change over N days using denoised price (prevents noise flips)
+    df['Momentum_5']  = denoised.pct_change(periods=5)  * 100.0
+    df['Momentum_10'] = denoised.pct_change(periods=10) * 100.0
+    df['Momentum_20'] = denoised.pct_change(periods=20) * 100.0
+
+    # On-Balance Volume: cumulative volume signed by price direction
+    # A rising OBV confirms price trend; divergence signals reversal
+    obv = (np.sign(denoised.diff()) * df['Volume']).fillna(0).cumsum()
+    # Normalise to z-score over 50-day window to make it comparable across assets
+    obv_mean = obv.rolling(50).mean()
+    obv_std  = obv.rolling(50).std().replace(0, 1e-9)
+    df['OBV'] = (obv - obv_mean) / obv_std
+
+    # Volatility regime: ATR normalised by denoised price
+    # High values = high volatility regime, low = calm market
+    df['Vol_Regime'] = df['ATR_14'] / (denoised + 1e-9)
+
+    # Trend strength: SMA20 / SMA50 - 1
+    # Positive → price in uptrend (fast MA above slow MA)
+    # Negative → downtrend
+    df['Trend_Strength'] = (df['SMA_20'] / (df['SMA_50'] + 1e-9)) - 1.0
+
+    # Williams %R: measures overbought/oversold [-100 to 0]
+    # -100 to -80: oversold (potential buy), -20 to 0: overbought (potential sell)
+    highest_high = df['High'].rolling(14).max()
+    lowest_low   = df['Low'].rolling(14).min()
+    df['Williams_R'] = -100 * (highest_high - denoised) / (highest_high - lowest_low + 1e-9)
+
+    # Price vs 50-day SMA: normalised distance from medium-term mean
+    # Captures mean-reversion and trend following signals
+    df['Price_vs_SMA50'] = (denoised / (df['SMA_50'] + 1e-9)) - 1.0
+
+    # --- v3.0 Cross-Asset Sector Peer Features ---
+    sector_ticker = SECTOR_MAP.get(ticker, "SPY")
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
+    sector_path = os.path.join(root_dir, f"data/raw/{sector_ticker}.csv")
+
+    if os.path.exists(sector_path):
+        try:
+            sector_df = pd.read_csv(sector_path, index_col='Date', parse_dates=True)
+            sector_df.sort_index(inplace=True)
+            sector_close = sector_df['Close']
+            sector_denoised = hull_moving_average(sector_close, window=14).fillna(sector_close)
+            
+            # 5d and 20d returns of sector index
+            sector_return_5 = sector_denoised.pct_change(periods=5) * 100.0
+            sector_return_20 = sector_denoised.pct_change(periods=20) * 100.0
+            
+            # Align sector returns causally
+            aligned_sector = pd.DataFrame(index=df.index)
+            aligned_sector['Sector_Return_5d'] = sector_return_5.reindex(df.index, method='ffill').fillna(0.0)
+            aligned_sector['Sector_Return_20d'] = sector_return_20.reindex(df.index, method='ffill').fillna(0.0)
+            
+            df['Sector_Return_5d'] = aligned_sector['Sector_Return_5d']
+            df['Sector_Return_20d'] = aligned_sector['Sector_Return_20d']
+        except Exception as ex:
+            print(f"   ⚠️  Failed to compute sector peer features for {ticker}: {ex}")
+            df['Sector_Return_5d'] = 0.0
+            df['Sector_Return_20d'] = 0.0
+    else:
+        df['Sector_Return_5d'] = 0.0
+        df['Sector_Return_20d'] = 0.0
+
+    df['Relative_Strength_5d'] = df['Momentum_5'] - df['Sector_Return_5d']
+    df['Relative_Strength_20d'] = df['Momentum_20'] - df['Sector_Return_20d']
 
     # Target: n-day-ahead percentage return
     df['Target_Return'] = close.pct_change(periods=target_shift).shift(-target_shift) * 100.0
@@ -211,6 +326,40 @@ def process_all_data(timeframe=None):
     macro_df = load_macro_data(root_dir)
     fx_df    = load_fx_data(root_dir)
 
+    # ---- Compute global macro correlations & Safe-Haven indicators (v3.0) ----
+    try:
+        spy_path = os.path.join(raw_dir, "SPY.csv")
+        gold_path = os.path.join(raw_dir, "GC=F.csv")
+        oil_path = os.path.join(raw_dir, "CL=F.csv")
+        
+        if os.path.exists(spy_path) and os.path.exists(gold_path) and os.path.exists(oil_path):
+            spy_close = pd.read_csv(spy_path, index_col='Date', parse_dates=True)['Close'].sort_index()
+            gold_close = pd.read_csv(gold_path, index_col='Date', parse_dates=True)['Close'].sort_index()
+            oil_close = pd.read_csv(oil_path, index_col='Date', parse_dates=True)['Close'].sort_index()
+            
+            # Causal Denoising using HMA
+            spy_denoised = hull_moving_average(spy_close, window=14).fillna(spy_close)
+            gold_denoised = hull_moving_average(gold_close, window=14).fillna(gold_close)
+            oil_denoised = hull_moving_average(oil_close, window=14).fillna(oil_close)
+            
+            global_df = pd.DataFrame(index=spy_close.index)
+            global_df['Gold_Return_5d']   = (gold_denoised.pct_change(periods=5) * 100.0).fillna(0.0)
+            global_df['Oil_Return_5d']    = (oil_denoised.pct_change(periods=5) * 100.0).fillna(0.0)
+            global_df['Safe_Haven_Ratio'] = (gold_denoised / (spy_denoised + 1e-9)).fillna(0.0)
+            global_df['Equity_Gold_Corr'] = spy_denoised.rolling(20).corr(gold_denoised).fillna(0.0)
+            global_df['Equity_Oil_Corr']  = spy_denoised.rolling(20).corr(oil_denoised).fillna(0.0)
+            
+            if macro_df is not None:
+                # Merge into macro_df
+                macro_df = macro_df.join(global_df, how='left').ffill().bfill().fillna(0.0)
+            else:
+                macro_df = global_df
+            print("   ✅ Computed global cross-asset Safe-Haven & Correlation indicators!")
+        else:
+            print("   ⚠️  SPY, Gold, or Oil CSV missing. Safe-Haven indicators will be zero.")
+    except Exception as e:
+        print(f"   ⚠️  Could not compute global macro indicators: {e}")
+
     # ---- Step 1: Build per-asset DataFrames ----
     asset_dfs = {}
     for ticker, category in ASSETS.items():
@@ -223,10 +372,12 @@ def process_all_data(timeframe=None):
         df.sort_index(inplace=True)
 
         # Technical indicators + target
-        df = add_technical_indicators(df, target_shift)
+        df = add_technical_indicators(df, ticker, target_shift)
 
         # Drop rows where core technical indicators haven't warmed up yet
-        core_cols = ['SMA_20', 'SMA_50', 'RSI', 'ATR_14', 'MACD', 'BB_High']
+        # Include new v2.0 features: OBV needs 50-day window, Momentum_20 needs 20 days
+        core_cols = ['SMA_20', 'SMA_50', 'RSI', 'ATR_14', 'MACD', 'BB_High',
+                     'Momentum_20', 'OBV', 'Trend_Strength', 'Williams_R']
         df.dropna(subset=core_cols, inplace=True)
         df.dropna(subset=['Target_Return'], inplace=True)
 

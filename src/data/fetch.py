@@ -58,8 +58,10 @@ def fetch_all_assets():
 
     root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
 
-    # Fetch each stock/ETF
-    for ticker in ASSETS.keys():
+    # Fetch each stock/ETF + support Sector Indices
+    tickers = list(ASSETS.keys())
+    support_indices = ["XLK", "XLY", "XLV", "XLF", "XLP"]
+    for ticker in tickers + support_indices:
         output_path = os.path.join(root_dir, f'data/raw/{ticker}.csv')
         try:
             fetch_historical_data(ticker, output_path)

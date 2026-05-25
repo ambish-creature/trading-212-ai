@@ -182,26 +182,30 @@ def run_training_cycle(cycle, penalty_factor, n_trials, timeframe):
     )
 
     def objective(trial):
-        hidden_size = trial.suggest_categorical("hidden_size", [32, 64, 128])
-        num_layers  = trial.suggest_int("num_layers", 1, 3)
-        dropout     = trial.suggest_float("dropout", 0.1, 0.5)
-        lr          = trial.suggest_float("lr", 1e-4, 2e-3, log=True)
-        batch_size  = trial.suggest_categorical("batch_size", [32, 64, 128])
+        hidden_size  = trial.suggest_categorical("hidden_size", [64, 128, 256])
+        num_layers   = trial.suggest_int("num_layers", 1, 3)
+        dropout      = trial.suggest_float("dropout", 0.1, 0.4)
+        lr           = trial.suggest_float("lr", 5e-5, 5e-4, log=True)
+        batch_size   = trial.suggest_categorical("batch_size", [32, 64, 128])
         weight_decay = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
+        num_heads    = trial.suggest_categorical("num_heads", [2, 4, 8])
+        noise_std        = trial.suggest_float("noise_std", 0.001, 0.05, log=True)
+        direction_weight = trial.suggest_float("direction_weight", 0.1, 1.0)
 
         train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
         val_loader   = DataLoader(TensorDataset(X_val,   y_val),   batch_size=batch_size, shuffle=False)
 
-        model     = LSTMAttention(input_size, hidden_size, num_layers, dropout).to(device)
-        criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0)
-        optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
+        model     = LSTMAttention(input_size, hidden_size, num_layers, dropout, num_heads).to(device)
+        criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0, direction_weight=direction_weight)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=20, T_mult=2)
         es        = EarlyStopping(patience=15)
 
         for epoch in range(100):
             model.train()
             for bX, by in train_loader:
                 bX, by = bX.to(device), by.to(device)
+                bX = bX + torch.randn_like(bX) * noise_std  # noise augmentation
                 optimizer.zero_grad()
                 mu, log_sigma = model(bX)
                 var = torch.exp(2 * log_sigma)
@@ -219,7 +223,7 @@ def run_training_cycle(cycle, penalty_factor, n_trials, timeframe):
                     var = torch.exp(2 * log_sigma)
                     val_loss += criterion(mu, by, var).item()
             avg_val = val_loss / len(val_loader)
-            scheduler.step(avg_val)
+            scheduler.step(epoch + 1)  # CosineAnnealingWarmRestarts uses epoch
             es(avg_val)
             trial.report(avg_val, epoch)
             if trial.should_prune():
@@ -236,23 +240,29 @@ def run_training_cycle(cycle, penalty_factor, n_trials, timeframe):
 
     print(f"      Best val NLL: {best_val:.4f} | Params: {best_params}")
 
-    # Train final model with best params
+    # Train final model with best params (v2.0 architecture)
     batch_size   = best_params['batch_size']
+    num_heads    = best_params.get('num_heads', 4)
+    noise_std    = best_params.get('noise_std', 0.01)
     train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(TensorDataset(X_val,   y_val),   batch_size=batch_size, shuffle=False)
 
     model     = LSTMAttention(input_size, best_params['hidden_size'],
-                              best_params['num_layers'], best_params['dropout']).to(device)
-    criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0)
+                              best_params['num_layers'], best_params['dropout'],
+                              num_heads).to(device)
+    dw = best_params.get('direction_weight', 0.5)
+    ds = best_params.get('direction_scale', 1.0)
+    criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0, direction_weight=dw, direction_scale=ds)
     wd = best_params.get('weight_decay', 1e-5)
-    optimizer = torch.optim.Adam(model.parameters(), lr=best_params['lr'], weight_decay=wd)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
-    es        = EarlyStopping(pvariance=15 if 'pvariance' in dir(EarlyStopping) else 15)  # Fallback to patience check
+    optimizer = torch.optim.AdamW(model.parameters(), lr=best_params['lr'], weight_decay=wd)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=20, T_mult=2)
+    es        = EarlyStopping(patience=25)  # Fixed: was misspelled as 'pvariance'
 
     for epoch in range(100):
         model.train()
         for bX, by in train_loader:
             bX, by = bX.to(device), by.to(device)
+            bX = bX + torch.randn_like(bX) * noise_std  # noise augmentation
             optimizer.zero_grad()
             mu, log_sigma = model(bX)
             var = torch.exp(2 * log_sigma)
@@ -270,11 +280,23 @@ def run_training_cycle(cycle, penalty_factor, n_trials, timeframe):
                 var = torch.exp(2 * log_sigma)
                 val_loss += criterion(mu, by, var).item()
         avg_val = val_loss / len(val_loader)
-        scheduler.step(avg_val)
-        es(avg_val)
+        scheduler.step(epoch + 1)  # CosineAnnealingWarmRestarts uses epoch
+        es(avg_val, model)  # pass model to save best weights
         if es.early_stop:
             print(f"      Early stopping at epoch {epoch}")
+            es.restore_best_weights(model)  # restore best weights before saving
             break
+
+    # --- Compute optimal ratio threshold for this cycle's model ---
+    try:
+        from src.models.train import compute_optimal_ratio_threshold
+        val_loader_calib = DataLoader(TensorDataset(X_val, y_val), batch_size=batch_size, shuffle=False)
+        optimal_r, calib_found = compute_optimal_ratio_threshold(model, val_loader_calib, device, n_mc_samples=20)
+        best_params['optimal_ratio_threshold'] = optimal_r
+        best_params['calibration_achieved_80pct'] = calib_found
+        print(f"      📐 Optimal ratio threshold: {optimal_r:.4f} (80% achieved: {calib_found})")
+    except Exception as e:
+        print(f"      ⚠️  Calibration failed: {e}")
 
     # Save model
     timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")

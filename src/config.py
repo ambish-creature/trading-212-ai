@@ -4,16 +4,22 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 
-API_KEY = os.getenv("TRADING212_API_KEY")
-API_SECRET = os.getenv("TRADING212_API_SECRET")
+API_KEY_REAL = os.getenv("TRADING212_API_KEY_REAL")
+API_SECRET_REAL = os.getenv("TRADING212_API_SECRET_REAL")
+API_KEY_DEMO = os.getenv("TRADING212_API_KEY_DEMO")
+API_SECRET_DEMO = os.getenv("TRADING212_API_SECRET_DEMO")
 
-# Example configuration values
+# Keep default fallback for backward compatibility
+API_KEY = os.getenv("TRADING212_API_KEY") or API_KEY_DEMO
+API_SECRET = os.getenv("TRADING212_API_SECRET") or API_SECRET_DEMO
+
 BASE_URL_LIVE = "https://live.trading212.com/api/v0"
 BASE_URL_DEMO = "https://demo.trading212.com/api/v0"
 ENVIRONMENT = "DEMO"  # Switch to LIVE when ready
 
-def get_base_url():
-    return BASE_URL_DEMO if ENVIRONMENT == "DEMO" else BASE_URL_LIVE
+def get_base_url(real=False):
+    return BASE_URL_LIVE if real else BASE_URL_DEMO
+
 
 # ---------------------------------------------------------------------------
 # Portfolio Sizing (GBP)

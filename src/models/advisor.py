@@ -40,7 +40,7 @@ warnings.filterwarnings("ignore")
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 from src.config import TIMEFRAME_PROFILES, ACTIVE_TIMEFRAME, ASSETS, HISTORICAL_AER
 from src.models.train import LSTMAttention
-from src.models.predict import find_latest_model, mc_dropout_predict
+from src.models.predict import find_latest_model, mc_dropout_predict, load_model_and_params
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
 
@@ -84,15 +84,46 @@ def fetch_ticker_info(ticker):
         }
 
 
-def prepare_input_for_date(ticker, reference_date, scaler, feature_cols, seq_length):
+# Mapped Sector ETFs for Peer Momentum (v3.0)
+SECTOR_MAP = {
+    "VOO": "SPY", "SPY": "SPY", "VWRL.L": "SPY", "IWY": "SPY", "AIQ": "SPY",
+    "AAPL": "XLK", "MSFT": "XLK", "NVDA": "XLK", "AMZN": "XLY", "GOOGL": "XLK",
+    "META": "XLK", "TSLA": "XLY", "AVGO": "XLK", "TSM": "XLK", "ASML": "XLK",
+    "NFLX": "XLY", "AMD": "XLK",
+    "BRK-B": "SPY", "LLY": "XLV", "JPM": "XLF", "V": "XLF", "NVO": "XLV",
+    "UNH": "XLV", "MA": "XLF", "COST": "XLP",
+    "BTC-USD": "SPY", "CL=F": "SPY", "GC=F": "SPY", "SI=F": "SPY"
+}
+
+
+def wma(series, window):
+    """Computes Weighted Moving Average."""
+    weights = np.arange(1, window + 1)
+    return series.rolling(window).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
+
+
+def hull_moving_average(series, window=14):
+    """Computes lag-free Hull Moving Average."""
+    half_win = int(window / 2)
+    sqrt_win = int(np.sqrt(window))
+    wma_half = wma(series, half_win)
+    wma_full = wma(series, window)
+    diff = 2 * wma_half - wma_full
+    return wma(diff, sqrt_win)
+
+
+def prepare_input_for_date(ticker, reference_date, scaler, feature_cols, seq_length, timeframe=None):
     """
     Prepares the model input tensor using data up to (and including) `reference_date`.
     This lets you simulate advice as of any historical or current date.
 
     reference_date: datetime object (uses data up to this date)
+    timeframe: the active timeframe string (e.g. '1mo', '3mo') — MUST be passed to get correct profile
     Returns: (input_tensor, current_price, actual_reference_date)
     """
-    profile = TIMEFRAME_PROFILES[ACTIVE_TIMEFRAME]
+    if timeframe is None:
+        timeframe = ACTIVE_TIMEFRAME
+    profile  = TIMEFRAME_PROFILES[timeframe]  # FIXED: was hardcoded to ACTIVE_TIMEFRAME
     interval = profile['interval']
 
     # Fetch enough history for indicators + sequence (fetch 3× seq_length days to be safe)
@@ -124,18 +155,22 @@ def prepare_input_for_date(ticker, reference_date, scaler, feature_cols, seq_len
 
     # --- Compute all technical indicators ---
     close = data['Close']
-    data['SMA_20']  = close.rolling(20).mean()
-    data['SMA_50']  = close.rolling(50).mean()
-    data['EMA_12']  = close.ewm(span=12, adjust=False).mean()
-    data['EMA_26']  = close.ewm(span=26, adjust=False).mean()
-    data['RSI']     = ta.momentum.RSIIndicator(close=close, window=14).rsi()
 
-    macd_ind         = ta.trend.MACD(close=close)
+    # Denoise close price causally using Hull Moving Average (lag-free)
+    denoised = hull_moving_average(close, window=14).fillna(close)
+
+    data['SMA_20']  = denoised.rolling(20).mean()
+    data['SMA_50']  = denoised.rolling(50).mean()
+    data['EMA_12']  = denoised.ewm(span=12, adjust=False).mean()
+    data['EMA_26']  = denoised.ewm(span=26, adjust=False).mean()
+    data['RSI']     = ta.momentum.RSIIndicator(close=denoised, window=14).rsi()
+
+    macd_ind         = ta.trend.MACD(close=denoised)
     data['MACD']        = macd_ind.macd()
     data['MACD_Signal'] = macd_ind.macd_signal()
     data['MACD_Hist']   = macd_ind.macd_diff()
 
-    bb = ta.volatility.BollingerBands(close=close, window=20, window_dev=2)
+    bb = ta.volatility.BollingerBands(close=denoised, window=20, window_dev=2)
     data['BB_High']  = bb.bollinger_hband()
     data['BB_Mid']   = bb.bollinger_mavg()
     data['BB_Low']   = bb.bollinger_lband()
@@ -147,10 +182,88 @@ def prepare_input_for_date(ticker, reference_date, scaler, feature_cols, seq_len
     data['ATR_14'] = atr_ind.average_true_range()
     data['Bid_Ask_Proxy'] = (data['High'] - data['Low']) / (close + 1e-9)
 
+    # --- v2.0 Enhanced Features (must match preprocess.py) ---
+    data['Momentum_5']  = denoised.pct_change(periods=5)  * 100.0
+    data['Momentum_10'] = denoised.pct_change(periods=10) * 100.0
+    data['Momentum_20'] = denoised.pct_change(periods=20) * 100.0
+
+    # OBV (z-scored over 50-day window)
+    obv = (np.sign(denoised.diff()) * data['Volume']).fillna(0).cumsum()
+    obv_mean = obv.rolling(50).mean()
+    obv_std  = obv.rolling(50).std().replace(0, 1e-9)
+    data['OBV'] = (obv - obv_mean) / obv_std
+
+    data['Vol_Regime']    = data['ATR_14'] / (denoised + 1e-9)
+    data['Trend_Strength'] = (data['SMA_20'] / (data['SMA_50'] + 1e-9)) - 1.0
+
+    highest_high = data['High'].rolling(14).max()
+    lowest_low   = data['Low'].rolling(14).min()
+    data['Williams_R'] = -100 * (highest_high - denoised) / (highest_high - lowest_low + 1e-9)
+    data['Price_vs_SMA50'] = (denoised / (data['SMA_50'] + 1e-9)) - 1.0
+
+    # --- v3.0 Cross-Asset Sector & Macro correlation features ---
+    sector_ticker = SECTOR_MAP.get(ticker, "SPY")
+
+    try:
+        support_data = yf.download(
+            [sector_ticker, "SPY", "GC=F", "CL=F"],
+            start=fetch_start.strftime('%Y-%m-%d'),
+            end=fetch_end.strftime('%Y-%m-%d'),
+            interval=interval,
+            progress=False
+        )
+        
+        # Parse close prices causally
+        if isinstance(support_data.columns, pd.MultiIndex):
+            sec_close = support_data['Close'][sector_ticker].dropna()
+            spy_close = support_data['Close']['SPY'].dropna()
+            gold_close = support_data['Close']['GC=F'].dropna()
+            oil_close = support_data['Close']['CL=F'].dropna()
+        else:
+            sec_close = support_data['Close'].dropna()
+            spy_close = sec_close
+            gold_close = sec_close
+            oil_close = sec_close
+            
+        sec_denoised = hull_moving_average(sec_close, window=14).fillna(sec_close)
+        spy_denoised = hull_moving_average(spy_close, window=14).fillna(spy_close)
+        gold_denoised = hull_moving_average(gold_close, window=14).fillna(gold_close)
+        oil_denoised = hull_moving_average(oil_close, window=14).fillna(oil_close)
+        
+        # Sector return
+        sec_ret_5 = (sec_denoised.pct_change(periods=5) * 100.0).fillna(0.0)
+        sec_ret_20 = (sec_denoised.pct_change(periods=20) * 100.0).fillna(0.0)
+        
+        # Global macro returns & correlations
+        gold_ret_5 = (gold_denoised.pct_change(periods=5) * 100.0).fillna(0.0)
+        oil_ret_5 = (oil_denoised.pct_change(periods=5) * 100.0).fillna(0.0)
+        safe_haven = (gold_denoised / (spy_denoised + 1e-9)).fillna(0.0)
+        eq_gold_corr = spy_denoised.rolling(20).corr(gold_denoised).fillna(0.0)
+        eq_oil_corr = spy_denoised.rolling(20).corr(oil_denoised).fillna(0.0)
+        
+        # Align causally to data index
+        data['Sector_Return_5d'] = sec_ret_5.reindex(data.index, method='ffill').fillna(0.0)
+        data['Sector_Return_20d'] = sec_ret_20.reindex(data.index, method='ffill').fillna(0.0)
+        data['Gold_Return_5d'] = gold_ret_5.reindex(data.index, method='ffill').fillna(0.0)
+        data['Oil_Return_5d'] = oil_ret_5.reindex(data.index, method='ffill').fillna(0.0)
+        data['Safe_Haven_Ratio'] = safe_haven.reindex(data.index, method='ffill').fillna(0.0)
+        data['Equity_Gold_Corr'] = eq_gold_corr.reindex(data.index, method='ffill').fillna(0.0)
+        data['Equity_Oil_Corr'] = eq_oil_corr.reindex(data.index, method='ffill').fillna(0.0)
+        
+    except Exception as ex:
+        print(f"   ⚠️  Could not fetch/compute support indices: {ex}")
+        for col in ['Sector_Return_5d', 'Sector_Return_20d', 'Gold_Return_5d', 
+                    'Oil_Return_5d', 'Safe_Haven_Ratio', 'Equity_Gold_Corr', 'Equity_Oil_Corr']:
+            data[col] = 0.0
+
+    data['Relative_Strength_5d'] = data['Momentum_5'] - data['Sector_Return_5d']
+    data['Relative_Strength_20d'] = data['Momentum_20'] - data['Sector_Return_20d']
+
     if 'Dividends' not in data.columns:
         data['Dividends'] = 0.0
     else:
         data['Dividends'] = data['Dividends'].fillna(0.0)
+
 
     # --- Load macro/FX/fundamental/sentiment data and align ---
     # Fallback values if external data files are not available
@@ -345,16 +458,29 @@ def generate_advice(
 
     if confidence < 75.0:
         # ─────────────────── SELECTIVE CLASSIFICATION (ACCURACY FILTER) ───────────────────
-        lines.append(f"  ⏸️  Signal: HOLD / WAIT  (Confidence {confidence:.0f}% < 75% High-Accuracy Filter)")
-        lines.append("")
-        lines.append(f"     The AI predicts a return of {mu:+.2f}%, but the self-estimated confidence")
-        lines.append("     is below the required 75% threshold to guarantee ≥80% direction accuracy.")
-        if holding_shares > 0:
-            lines.append(f"     ➡  HOLD your current {holding_shares:.4f} shares.")
-            lines.append(f"     ➡  Do NOT add more until a high-confidence signal (>=75%) appears.")
+        if confidence < 50.0:
+            lines.append(f"  ❓ Signal: UNCERTAIN MARKET / UNKNOWN PATTERN  (Confidence {confidence:.0f}% — Low Agreement)")
+            lines.append("")
+            lines.append(f"     The model indicates that market uncertainty is currently too high")
+            lines.append("     to identify a reliable trend or pattern. Different simulation paths")
+            lines.append("     heavily conflict, indicating a high-risk or neutral market regime.")
+            if holding_shares > 0:
+                lines.append(f"     ➡  Action: HOLD cash/shares. Do NOT average down or sell in panic.")
+                lines.append(f"     ➡  Wait for market volatility to subside before adjusting your position.")
+            else:
+                lines.append(f"     ➡  Action: STAND ASIDE. Do NOT open a new position.")
+                lines.append(f"     ➡  Hold 100% Cash for this asset. Capital preservation is priority.")
         else:
-            lines.append(f"     ➡  Do NOT open a new position yet.")
-            lines.append(f"     ➡  Wait for a clearer, high-confidence signal. Re-run in 2-3 trading days.")
+            lines.append(f"  ⏸️  Signal: HOLD / WAIT  (Confidence {confidence:.0f}% < 75% High-Accuracy Filter)")
+            lines.append("")
+            lines.append(f"     The AI predicts a return of {mu:+.2f}%, but the self-estimated confidence")
+            lines.append("     is below the required 75% threshold to guarantee ≥80% direction accuracy.")
+            if holding_shares > 0:
+                lines.append(f"     ➡  HOLD your current {holding_shares:.4f} shares.")
+                lines.append(f"     ➡  Do NOT add more until a high-confidence signal (>=75%) appears.")
+            else:
+                lines.append(f"     ➡  Do NOT open a new position yet.")
+                lines.append(f"     ➡  Wait for a clearer, high-confidence signal. Re-run in 2-3 trading days.")
     elif mu > 0 and confidence >= 45:
         # ─────────────────── BULLISH ───────────────────
         lines.append(f"  📈 Signal: BUY / BUY MORE  ({strength} — {confidence:.0f}% confidence)")
@@ -558,25 +684,25 @@ def run_advisor(
 
     # Adjust sequence for custom horizon (we still use the base model)
     input_tensor, current_price, actual_ref_date = prepare_input_for_date(
-        ticker, reference_date, scaler, feature_cols, seq_length
+        ticker, reference_date, scaler, feature_cols, seq_length, timeframe=timeframe
     )
 
     device = torch.device(
         'cuda' if torch.cuda.is_available() else
         ('mps' if torch.backends.mps.is_available() else 'cpu')
     )
-    input_size = input_tensor.shape[2]
-    model = LSTMAttention(
-        input_size=input_size,
-        hidden_size=best_params['hidden_size'],
-        num_layers=best_params['num_layers'],
-        dropout=best_params['dropout']
-    ).to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+    # Use load_model_and_params for proper architecture detection (new vs legacy)
+    model, best_params_loaded, model_path_used = load_model_and_params(timeframe, device)
+    # Merge any extra params from saved file that might not be in best_params_loaded
+    for k, v in best_params.items():
+        if k not in best_params_loaded:
+            best_params_loaded[k] = v
+    best_params = best_params_loaded
 
     # Run MC Dropout (100 samples for high-quality uncertainty)
-    med_u = best_params.get('median_uncertainty', None)
-    pred_result = mc_dropout_predict(model, input_tensor, device, n_samples=100, median_uncertainty=med_u)
+    opt_ratio = best_params.get('optimal_ratio_threshold', 0.15)  # FIXED: default 0.15 not 0.35
+    pred_result = mc_dropout_predict(model, input_tensor, device, n_samples=100, optimal_ratio_threshold=opt_ratio)
+
 
 
     # Direct scaling from trained horizon target
@@ -597,7 +723,48 @@ def run_advisor(
     print(f"   📡 Fetching ticker metadata...")
     info = fetch_ticker_info(ticker)
 
-    # --- Interactive prompt for holding info ---
+    # --- Auto-load holding info from portfolios if not manually provided ---
+    if holding_shares == 0.0 and not ask_holdings:
+        try:
+            from src.trading.execution import get_portfolio_positions
+            
+            # Fetch real positions first (to analyze your actual ISA assets)
+            print(f"   📦 Checking your portfolios for {ticker}...")
+            real_positions = get_portfolio_positions(real=True)
+            
+            matched_pos = None
+            for pos in real_positions:
+                pos_ticker = pos.get("ticker", "")
+                from src.config import TICKER_MAPPING
+                mapped_ticker = TICKER_MAPPING.get(ticker, ticker)
+                if pos_ticker == mapped_ticker or ticker in pos_ticker or pos_ticker in ticker:
+                    matched_pos = pos
+                    print(f"      👉 Found in your REAL portfolio: {pos_ticker}")
+                    break
+                    
+            if not matched_pos:
+                # Fallback to DEMO portfolio
+                demo_positions = get_portfolio_positions(real=False)
+                for pos in demo_positions:
+                    pos_ticker = pos.get("ticker", "")
+                    from src.config import TICKER_MAPPING
+                    mapped_ticker = TICKER_MAPPING.get(ticker, ticker)
+                    if pos_ticker == mapped_ticker or ticker in pos_ticker or pos_ticker in ticker:
+                        matched_pos = pos
+                        print(f"      👉 Found in your DEMO portfolio: {pos_ticker}")
+                        break
+            
+            if matched_pos:
+                holding_shares = float(matched_pos.get("quantity", 0.0))
+                # Fallback list of possible average price keys
+                avg_cost = matched_pos.get("averagePrice", matched_pos.get("avgPrice", matched_pos.get("averagePricePaid", None)))
+                if avg_cost is not None:
+                    avg_cost = float(avg_cost)
+                print(f"      👉 Auto-loaded: {holding_shares:.4f} shares @ avg cost {avg_cost}")
+        except Exception as e:
+            print(f"   ⚠️  Could not auto-load portfolio holdings: {e}")
+
+    # --- Interactive prompt for holding info (manual fallback) ---
     if ask_holdings and holding_shares == 0.0:
         print(f"\n💬 Do you currently hold {ticker}? (Press Enter to use defaults)")
         try:
@@ -608,6 +775,7 @@ def run_advisor(
                 avg_cost = float(c) if c else None
         except (ValueError, EOFError):
             pass
+
 
     # --- Generate and print advice ---
     advice = generate_advice(

@@ -297,7 +297,8 @@ def align_external_series(external_df, target_index, cols, default_val=0.0):
 
 
 def create_sequences(features, targets, seq_length):
-    """Creates sliding windows for time-series data."""
+    """Creates sliding windows for time-series data (sequential, deterministic).
+    Used for validation and test splits where order and completeness matter."""
     xs, ys = [], []
     for i in range(len(features) - seq_length):
         xs.append(features[i:(i + seq_length)])
@@ -305,12 +306,73 @@ def create_sequences(features, targets, seq_length):
     return np.array(xs), np.array(ys)
 
 
-def process_all_data(timeframe=None):
+def create_random_sequences(features, targets, seq_length, n_samples, rng):
+    """
+    Creates training windows by randomly sampling start indices.
+
+    Stochastic Temporal Bootstrap:
+      - Picks a random start index from the valid range
+      - Extracts a seq_length window of features starting there
+      - Pairs it with the target at the window's last timestep
+      - Repeats n_samples times (overlaps are intentional & beneficial)
+
+    This produces a more diverse training set than sequential sliding windows
+    because it gives equal probability to every valid start date, avoiding the
+    redundancy of adjacent windows that differ by only 1 row.
+
+    Args:
+        features: numpy array of shape (n_rows, n_features)
+        targets:  numpy array of shape (n_rows,)
+        seq_length: length of each input window (e.g. 60 days)
+        n_samples: number of random windows to draw
+        rng: numpy RandomState or Generator for reproducibility
+
+    Returns:
+        X: numpy array of shape (n_samples, seq_length, n_features)
+        y: numpy array of shape (n_samples,)
+    """
+    max_start = len(features) - seq_length
+    if max_start <= 0:
+        return np.array([]), np.array([])
+
+    # Cap n_samples if the data is too short to meaningfully sample that many
+    # (but allow oversampling — that's the point of bootstrap)
+    starts = rng.integers(0, max_start, size=n_samples)
+
+    xs = np.empty((n_samples, seq_length, features.shape[1]), dtype=features.dtype)
+    ys = np.empty(n_samples, dtype=targets.dtype)
+
+    for idx, i in enumerate(starts):
+        xs[idx] = features[i : i + seq_length]
+        ys[idx] = targets[i + seq_length - 1]
+
+    return xs, ys
+
+
+# Default random samples per ticker, by horizon category
+# Short horizons get more samples (noisier signal → need more diversity)
+# Long horizons get fewer (limited valid start positions due to large target_shift)
+DEFAULT_N_SAMPLES = {
+    '1mo': 1000, '2mo': 1000, '3mo': 1000,
+    '6mo': 500,  '9mo': 400,  '1yr': 300, '2yr': 200,
+}
+
+
+def process_all_data(timeframe=None, n_samples=None, seed=None):
     if timeframe is None:
         timeframe = ACTIVE_TIMEFRAME
 
+    # Resolve n_samples: CLI override → per-timeframe default → fallback 500
+    if n_samples is None:
+        n_samples = DEFAULT_N_SAMPLES.get(timeframe, 500)
+
+    # Create a reproducible RNG (or a fresh one if no seed given)
+    rng = np.random.default_rng(seed)
+    seed_str = f"seed={seed}" if seed is not None else "random seed"
+
     print("=" * 60)
     print(f"🧠 STARTING RICH MULTI-SOURCE DATA PREPROCESSOR FOR TIMEFRAME: {timeframe}")
+    print(f"   🎲 Random Window Sampling: {n_samples} samples/ticker ({seed_str})")
     print("=" * 60)
 
     profile = TIMEFRAME_PROFILES[timeframe]
@@ -464,9 +526,22 @@ def process_all_data(timeframe=None):
                 'targets':  split_df['Target_Return'].values
             }
 
-        X_train, y_train = create_sequences(scaled['train']['features'], scaled['train']['targets'], seq_length)
+        # Training: use RANDOM window sampling (stochastic temporal bootstrap)
+        # This draws n_samples random start dates from the training period,
+        # producing a more diverse training set across all market regimes.
+        X_train, y_train = create_random_sequences(
+            scaled['train']['features'], scaled['train']['targets'],
+            seq_length, n_samples, rng
+        )
+
+        # Validation & Test: keep SEQUENTIAL windows (deterministic, complete)
+        # These must remain chronological for honest out-of-sample evaluation.
         X_val,   y_val   = create_sequences(scaled['val']['features'],   scaled['val']['targets'],   seq_length)
         X_test,  y_test  = create_sequences(scaled['test']['features'],  scaled['test']['targets'],  seq_length)
+
+        if X_train.size == 0:
+            print(f"   ⚠️  {ticker}: training data too short for seq_length={seq_length}, skipping.")
+            continue
 
         train_X_list.append(X_train)
         train_y_list.append(y_train)
@@ -475,7 +550,8 @@ def process_all_data(timeframe=None):
 
         np.save(os.path.join(processed_dir, f'{ticker}_X_test_{timeframe}.npy'), X_test)
         np.save(os.path.join(processed_dir, f'{ticker}_y_test_{timeframe}.npy'), y_test)
-        print(f"   ✅ {ticker}: train={X_train.shape}, val={X_val.shape}, test={X_test.shape}")
+        seq_old = len(scaled['train']['features']) - seq_length  # how many sequential would have been
+        print(f"   ✅ {ticker}: train={X_train.shape} (was {seq_old} sequential), val={X_val.shape}, test={X_test.shape}")
 
     # ---- Step 4: Stack + shuffle training set ----
     X_train_all = np.vstack(train_X_list)
@@ -495,8 +571,10 @@ def process_all_data(timeframe=None):
     with open(os.path.join(processed_dir, f'feature_cols_{timeframe}.pkl'), 'wb') as f:
         pickle.dump(all_feature_cols, f)
 
+    n_tickers = len(train_X_list)
     print("\n" + "=" * 60)
     print("🏁 RICH MULTI-SOURCE DATA PREPROCESSOR COMPLETED")
+    print(f"   Sampling Method:          🎲 Random Window Sampling ({n_samples}/ticker × {n_tickers} tickers)")
     print(f"   Unified Train shape:      {X_train_all.shape}")
     print(f"   Unified Validation shape: {X_val_all.shape}")
     print(f"   Total Features:           {len(all_feature_cols)}")
@@ -515,5 +593,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multi-horizon preprocessor.")
     parser.add_argument("--timeframe", type=str, default=None,
                         help="Specific timeframe (e.g. 1mo, 3mo). Defaults to ACTIVE_TIMEFRAME.")
+    parser.add_argument("--n-samples", type=int, default=None,
+                        help="Number of random windows to sample per ticker for training. "
+                             "Defaults: 1000 for short horizons (1-3mo), 300-500 for long (6mo-2yr).")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducible sampling. Omit for a fresh random seed each run.")
     args = parser.parse_args()
-    process_all_data(timeframe=args.timeframe)
+    process_all_data(timeframe=args.timeframe, n_samples=args.n_samples, seed=args.seed)

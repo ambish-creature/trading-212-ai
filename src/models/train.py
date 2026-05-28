@@ -300,7 +300,8 @@ def objective(trial):
     weight_decay     = trial.suggest_float("weight_decay", 1e-6, 1e-3, log=True)
     noise_std        = trial.suggest_float("noise_std", 0.001, 0.05, log=True)
     num_heads        = trial.suggest_categorical("num_heads", [2, 4, 8])
-    direction_weight = trial.suggest_float("direction_weight", 0.1, 1.0)
+    direction_weight = trial.suggest_float("direction_weight", 0.4, 2.0)
+    direction_scale  = trial.suggest_float("direction_scale", 1.0, 5.0)
 
     data_dir   = os.path.join(os.path.dirname(__file__), '../../data/processed/')
     X_train, y_train, X_val, y_val = load_data(data_dir, GLOBAL_TIMEFRAME)
@@ -312,7 +313,7 @@ def objective(trial):
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
 
     model     = LSTMAttention(input_size, hidden_size, num_layers, dropout, num_heads).to(device)
-    criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0, direction_weight=direction_weight)
+    criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0, direction_weight=direction_weight, direction_scale=direction_scale)
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     # CosineAnnealingWarmRestarts: better exploration, avoids local minima
@@ -416,11 +417,11 @@ def compute_optimal_ratio_threshold(model, val_loader, device, n_mc_samples=30):
     best_coverage = 0.0
     found = False
 
-    # Strategy: find smallest r such that samples with ratio <= r have >= 80% accuracy
+    # Strategy: find LARGEST r such that samples with ratio <= r have >= 80% accuracy
     # AND enough samples (>= 5% of total)
     min_samples = max(20, int(len(val_targets) * 0.05))
 
-    for r in sweep_values:
+    for r in sweep_values[::-1]:
         mask = val_ratios <= r
         count = np.sum(mask)
         if count >= min_samples:
@@ -431,7 +432,7 @@ def compute_optimal_ratio_threshold(model, val_loader, device, n_mc_samples=30):
                 found = True
                 print(f"   ✅ Found threshold: {optimal_r:.4f} "
                       f"(Acc={acc*100:.2f}%, Coverage={best_coverage*100:.2f}%)")
-                break  # Stop at the FIRST (smallest) r that achieves 80%
+                break  # Stop at the LARGEST r that achieves 80%
 
     if not found:
         # No threshold achieves 80% — find the one with the highest accuracy

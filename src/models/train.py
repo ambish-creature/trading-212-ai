@@ -279,12 +279,17 @@ def augment_with_noise(X_batch, noise_std=0.01):
 GLOBAL_TIMEFRAME = ACTIVE_TIMEFRAME
 
 
-def load_data(data_dir, timeframe):
+def load_data(data_dir, timeframe, device=None):
     """Loads processed numpy arrays and creates DataLoaders."""
     X_train = torch.tensor(np.load(os.path.join(data_dir, f'X_train_{timeframe}.npy')), dtype=torch.float32)
     y_train = torch.tensor(np.load(os.path.join(data_dir, f'y_train_{timeframe}.npy')), dtype=torch.float32)
     X_val   = torch.tensor(np.load(os.path.join(data_dir, f'X_val_{timeframe}.npy')),   dtype=torch.float32)
     y_val   = torch.tensor(np.load(os.path.join(data_dir, f'y_val_{timeframe}.npy')),   dtype=torch.float32)
+    if device is not None:
+        X_train = X_train.to(device)
+        y_train = y_train.to(device)
+        X_val = X_val.to(device)
+        y_val = y_val.to(device)
     return X_train, y_train, X_val, y_val
 
 
@@ -303,14 +308,16 @@ def objective(trial):
     direction_weight = trial.suggest_float("direction_weight", 0.4, 2.0)
     direction_scale  = trial.suggest_float("direction_scale", 1.0, 5.0)
 
+    device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
     data_dir   = os.path.join(os.path.dirname(__file__), '../../data/processed/')
-    X_train, y_train, X_val, y_val = load_data(data_dir, GLOBAL_TIMEFRAME)
+    
+    # Speedup: Load dataset directly into GPU memory to bypass CPU bottleneck!
+    X_train, y_train, X_val, y_val = load_data(data_dir, GLOBAL_TIMEFRAME, device)
     input_size = X_train.shape[2]
 
+    # Data loaders are instant because memory is already on device
     train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
     val_loader   = DataLoader(TensorDataset(X_val,   y_val),   batch_size=batch_size, shuffle=False)
-
-    device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
 
     model     = LSTMAttention(input_size, hidden_size, num_layers, dropout, num_heads).to(device)
     criterion = AsymmetricGaussianNLLLoss(penalty_factor=1.0, direction_weight=direction_weight, direction_scale=direction_scale)
@@ -457,32 +464,20 @@ def compute_optimal_ratio_threshold(model, val_loader, device, n_mc_samples=30):
 def train_and_save_final_model(best_params, num_heads=4):
     """Trains the model with the best parameters and saves a timestamped backup."""
     print("\n--- Training Final Model with Best Parameters ---")
+    device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
+    
     data_dir = os.path.join(os.path.dirname(__file__), '../../data/processed/')
-    X_train, y_train, X_val, y_val = load_data(data_dir, GLOBAL_TIMEFRAME)
+    # Speedup: Load dataset directly into GPU memory to bypass CPU bottleneck!
+    X_train, y_train, X_val, y_val = load_data(data_dir, GLOBAL_TIMEFRAME, device)
     input_size = X_train.shape[2]
 
     batch_size   = best_params['batch_size']
     noise_std    = best_params.get('noise_std', 0.01)
     used_heads   = best_params.get('num_heads', num_heads)
 
-    # Performance Optimization: GPU memory pinning and parallel workers
-    is_cuda = torch.cuda.is_available()
-    train_loader = DataLoader(
-        TensorDataset(X_train, y_train), 
-        batch_size=batch_size, 
-        shuffle=True,
-        pin_memory=is_cuda,
-        num_workers=2 if is_cuda else 0
-    )
-    val_loader = DataLoader(
-        TensorDataset(X_val, y_val), 
-        batch_size=batch_size, 
-        shuffle=False,
-        pin_memory=is_cuda,
-        num_workers=2 if is_cuda else 0
-    )
-
-    device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
+    # Data loaders are instant because memory is already on device
+    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(TensorDataset(X_val,   y_val),   batch_size=batch_size, shuffle=False)
 
     model = LSTMAttention(
         input_size=input_size,
@@ -630,7 +625,11 @@ if __name__ == "__main__":
         sampler = optuna.samplers.TPESampler(seed=42)
         pruner  = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=20)
         study   = optuna.create_study(direction="minimize", sampler=sampler, pruner=pruner)
-        study.optimize(objective, n_trials=args.trials, show_progress_bar=False)
+        
+        # Parallel Execution: Run multiple trials in parallel on the GPU to utilize RTX 4080 compute power!
+        n_jobs = 4 if torch.cuda.is_available() else 1
+        print(f"🚀 Speedup Active: Running {n_jobs} trials concurrently.")
+        study.optimize(objective, n_trials=args.trials, show_progress_bar=False, n_jobs=n_jobs)
 
         print("\nBest Trial:")
         trial = study.best_trial

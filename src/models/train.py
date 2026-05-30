@@ -465,8 +465,22 @@ def train_and_save_final_model(best_params, num_heads=4):
     noise_std    = best_params.get('noise_std', 0.01)
     used_heads   = best_params.get('num_heads', num_heads)
 
-    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=batch_size, shuffle=True)
-    val_loader   = DataLoader(TensorDataset(X_val,   y_val),   batch_size=batch_size, shuffle=False)
+    # Performance Optimization: GPU memory pinning and parallel workers
+    is_cuda = torch.cuda.is_available()
+    train_loader = DataLoader(
+        TensorDataset(X_train, y_train), 
+        batch_size=batch_size, 
+        shuffle=True,
+        pin_memory=is_cuda,
+        num_workers=2 if is_cuda else 0
+    )
+    val_loader = DataLoader(
+        TensorDataset(X_val, y_val), 
+        batch_size=batch_size, 
+        shuffle=False,
+        pin_memory=is_cuda,
+        num_workers=2 if is_cuda else 0
+    )
 
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
 
@@ -490,37 +504,59 @@ def train_and_save_final_model(best_params, num_heads=4):
     # Early stopping with longer patience for final model
     early_stopping = EarlyStopping(patience=30)
 
+    # Mixed Precision Training (AMP) for maximum GPU speedup
+    scaler = torch.cuda.amp.GradScaler(enabled=is_cuda)
+
     epochs = 200
-    for epoch in range(epochs):
-        model.train()
-        for batch_X, batch_y in train_loader:
-            batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-            batch_X = augment_with_noise(batch_X, noise_std)
-            optimizer.zero_grad()
-            mu, log_sigma = model(batch_X)
-            variance = torch.exp(2 * log_sigma)
-            loss = criterion(mu, batch_y, variance)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for batch_X, batch_y in val_loader:
+    interrupted = False
+    
+    print("🚀 Speed Optimization Active: CUDA Mixed Precision (AMP) & Pin Memory.")
+    print("🛑 Ctrl+C Intercept Active: You can stop training anytime, best model weights will be saved gracefully!")
+    
+    try:
+        for epoch in range(epochs):
+            model.train()
+            for batch_X, batch_y in train_loader:
                 batch_X, batch_y = batch_X.to(device), batch_y.to(device)
-                mu, log_sigma = model(batch_X)
-                variance = torch.exp(2 * log_sigma)
-                val_loss += criterion(mu, batch_y, variance).item()
+                batch_X = augment_with_noise(batch_X, noise_std)
+                optimizer.zero_grad()
+                
+                # Autocast forward pass under AMP
+                with torch.cuda.amp.autocast(enabled=is_cuda):
+                    mu, log_sigma = model(batch_X)
+                    variance = torch.exp(2 * log_sigma)
+                    loss = criterion(mu, batch_y, variance)
+                
+                # Scaled backprop
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
 
-        avg_val_loss = val_loss / len(val_loader)
-        scheduler.step(epoch + 1)
-        early_stopping(avg_val_loss, model)
+            model.eval()
+            val_loss = 0
+            with torch.no_grad():
+                for batch_X, batch_y in val_loader:
+                    batch_X, batch_y = batch_X.to(device), batch_y.to(device)
+                    with torch.cuda.amp.autocast(enabled=is_cuda):
+                        mu, log_sigma = model(batch_X)
+                        variance = torch.exp(2 * log_sigma)
+                        val_loss += criterion(mu, batch_y, variance).item()
 
-        if early_stopping.early_stop:
-            print(f"Early stopping triggered at epoch {epoch}. Restoring best weights.")
-            early_stopping.restore_best_weights(model)
-            break
+            avg_val_loss = val_loss / len(val_loader)
+            scheduler.step(epoch + 1)
+            early_stopping(avg_val_loss, model)
+
+            if early_stopping.early_stop:
+                print(f"Early stopping triggered at epoch {epoch}. Restoring best weights.")
+                early_stopping.restore_best_weights(model)
+                break
+                
+    except KeyboardInterrupt:
+        print("\n🛑 Training gracefully interrupted by user (Ctrl+C). Saving the best model weights obtained so far...")
+        early_stopping.restore_best_weights(model)
+        interrupted = True
 
     # Compute median uncertainty
     model.eval()
@@ -528,8 +564,9 @@ def train_and_save_final_model(best_params, num_heads=4):
     with torch.no_grad():
         for batch_X, _ in val_loader:
             batch_X = batch_X.to(device)
-            _, log_sigma = model(batch_X)
-            sigma = torch.exp(log_sigma)
+            with torch.cuda.amp.autocast(enabled=is_cuda):
+                _, log_sigma = model(batch_X)
+                sigma = torch.exp(log_sigma)
             val_uncertainties.extend(sigma.cpu().numpy().tolist())
     median_u = float(np.median(val_uncertainties))
     best_params['median_uncertainty'] = median_u
@@ -540,9 +577,12 @@ def train_and_save_final_model(best_params, num_heads=4):
     optimal_r, calibration_found = compute_optimal_ratio_threshold(model, val_loader, device)
     best_params['optimal_ratio_threshold'] = optimal_r
     best_params['calibration_achieved_80pct'] = calibration_found
+    best_params['training_interrupted'] = interrupted
 
     # Save model
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if interrupted:
+        timestamp += "_interrupted"
     save_dir  = os.path.join(os.path.dirname(__file__), '../../models/saved/')
     os.makedirs(save_dir, exist_ok=True)
 

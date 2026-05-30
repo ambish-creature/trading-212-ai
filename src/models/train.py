@@ -395,7 +395,7 @@ def compute_optimal_ratio_threshold(model, val_loader, device, n_mc_samples=30):
             val_preds.extend(np.mean(mus_arr, axis=0).tolist())
             val_mc_stds.extend(np.std(mus_arr, axis=0).tolist())
             val_model_sigmas.extend(np.mean(sigmas_arr, axis=0).tolist())
-            val_targets.extend(batch_y.numpy().tolist())
+            val_targets.extend(batch_y.cpu().numpy().tolist())
 
     val_preds        = np.array(val_preds)
     val_mc_stds      = np.array(val_mc_stds)

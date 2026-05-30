@@ -1,0 +1,15 @@
+[Unit]
+Description=Trading 212 AI Stock prediction Web Server
+After=network.target
+
+[Service]
+Type=simple
+User=toto
+WorkingDirectory=/home/toto/Documents/Coding/Trading 212 API/trading-212-ai
+ExecStart="/home/toto/Documents/Coding/Trading 212 API/trading-212-ai/src/web/start_web.sh"
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

@@ -718,10 +718,13 @@ def run_advisor(
     pred_scaled['predicted_return'] = scaled_return
     pred_scaled['lower_bound']       = scaled_lower
     pred_scaled['upper_bound']       = scaled_upper
+    pred_scaled['current_price']     = current_price
+    pred_scaled['actual_ref_date']   = actual_ref_date.strftime('%Y-%m-%d')
 
     # Fetch additional ticker metadata
     print(f"   📡 Fetching ticker metadata...")
     info = fetch_ticker_info(ticker)
+    pred_scaled['info'] = info
 
     # --- Auto-load holding info from portfolios if not manually provided ---
     if holding_shares == 0.0 and not ask_holdings:

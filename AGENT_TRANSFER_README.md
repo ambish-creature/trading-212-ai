@@ -17,6 +17,7 @@ The target of this project is a **fully autonomous, 24/7 self-training and execu
 6. **Personal AI Finance Advisor CLI**: Shipped a professional interactive advice CLI (`advisor.py`) that accepts custom horizons/historical simulated dates and displays highly readable holding-specific recommendations (staged buy/sell tranches, stop-loss targets, confidence tiers, and savings benchmark warnings).
 7. **Self-Tuning Hyperparameter Optimization**: Orchestrated an automated tuning script (`auto_train.py`) that adaptively scales regularization and crash penalty factors across rolling validation windows to beat benchmark targets.
 8. **24/7 Production Scheduler**: An orchestrator schedules daily trading signals at Nasdaq Open (9:35 AM EST, Mon–Fri) and weekly model self-retraining (12:00 AM Saturdays).
+9. **FastAPI Web Server & Glassmorphic Dashboard**: Deployed a premium, production-ready web dashboard running 24/7 on the Raspberry Pi 5 under **`https://stock.wmt615.com`**. Employs secure, web-managed **Cloudflare Tunnels (`cloudflared`)**, systemd auto-recovery services, and a strict **`asyncio.Lock()` FIFO request queue** to protect the Pi's CPU from concurrent PyTorch model loads.
 
 ---
 
@@ -103,6 +104,12 @@ graph TD
    - Production system wrapper. Schedules jobs:
      - **Daily (9:35 AM EST, Mon–Fri)**: Fetches bar data, processes indicators, executes `loop.py` trading orders.
      - **Weekly (Saturdays 12:00 AM EST)**: Downloads full fresh history, processes dataset, and retrains the model.
+
+9. **`src/web/` (FastAPI Server & Glassmorphic Dashboard)**:
+   - **`app.py`**: Lightweight, fast FastAPI backend. Integrates predictions by offloading CPU-intensive `run_advisor` to a concurrent threadpool, protected by a strict `asyncio.Lock()` queue.
+   - **`templates/index.html`**: Premium single-page glassmorphic interface with interactive stock forecasts, live queue status polling, and portfolio simulation cards.
+   - **`static/css/styles.css`**: Deep dark theme with glowing neon badges, backdrop blurs, responsive grids, and sleek typography variables.
+   - **`start_web.sh` & `trading-web.service`**: Bash wrapper and systemd service descriptors to manage the background daemon persistently on your Pi.
 
 ---
 

@@ -141,6 +141,15 @@ INVERSE_MAPPING = {v: k for k, v in TICKER_MAPPING.items()}
 # ---------------------------------------------------------------------------
 
 TIMEFRAME_PROFILES = {
+    # Dynamic Short-Term daily horizons (1d to 28d)
+    **{
+        f"{d}d": {
+            "interval": "1d",
+            "fetch_period": "10y",
+            "seq_length": 60,
+            "target_shift": d
+        } for d in range(1, 29)
+    },
     "1mo": {
         "interval": "1d",
         "fetch_period": "10y",

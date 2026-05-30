@@ -627,7 +627,7 @@ if __name__ == "__main__":
         study   = optuna.create_study(direction="minimize", sampler=sampler, pruner=pruner)
         
         # Parallel Execution: Run multiple trials in parallel on the GPU to utilize RTX 4080 compute power!
-        n_jobs = 8 if torch.cuda.is_available() else 1
+        n_jobs = 6 if torch.cuda.is_available() else 1
         print(f"🚀 Speedup Active: Running {n_jobs} trials concurrently.")
         study.optimize(objective, n_trials=args.trials, show_progress_bar=False, n_jobs=n_jobs)
 

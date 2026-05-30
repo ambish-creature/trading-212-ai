@@ -465,6 +465,7 @@ def train_and_save_final_model(best_params, num_heads=4):
     """Trains the model with the best parameters and saves a timestamped backup."""
     print("\n--- Training Final Model with Best Parameters ---")
     device = torch.device('cuda' if torch.cuda.is_available() else ('mps' if torch.backends.mps.is_available() else 'cpu'))
+    is_cuda = (device.type == 'cuda')
     
     data_dir = os.path.join(os.path.dirname(__file__), '../../data/processed/')
     # Speedup: Load dataset directly into GPU memory to bypass CPU bottleneck!
